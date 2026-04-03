@@ -13,6 +13,10 @@ venv/
 data/*.txt
 data/*.csv
 
+# Private docs (developer briefs, notes with personal info)
+docs/EEG_Developer_Brief_v23.docx
+docs/*.docx
+
 # OS
 .DS_Store
 Thumbs.db
