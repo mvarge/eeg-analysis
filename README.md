@@ -39,7 +39,7 @@ Click the green **Code** button on GitHub → **Download ZIP** → unzip it some
 
 Or if you're comfortable with Terminal:
 ```bash
-git clone https://github.com/YOUR_USERNAME/eeg-analysis.git
+git clone https://github.com/mvarge/eeg-analysis.git
 cd eeg-analysis
 ```
 
