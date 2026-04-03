@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EEG Flanker Analysis</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=JetBrains+Mono:wght@300;400;500;600&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400;8..60,600&display=swap" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Animated EEG wave background -->
+    <canvas id="bg-wave" aria-hidden="true"></canvas>
+
+    <header>
+        <div class="header-inner">
+            <div class="logo-mark">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                    <circle cx="16" cy="16" r="15" stroke="var(--accent)" stroke-width="1"/>
+                    <path d="M4 16 Q8 8, 12 16 T20 16 T28 16" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+                </svg>
+            </div>
+            <div class="header-text">
+                <h1>EEG Flanker Analysis</h1>
+                <p class="subtitle">Eriksen Flanker Task · Theta & Beta Power Extraction</p>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <!-- Upload Section -->
+        <section id="upload-section" class="section">
+            <div class="upload-zone" id="drop-zone">
+                <div class="upload-icon">
+                    <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                        <path d="M24 32V12M24 12L16 20M24 12L32 20" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+                        <path d="M8 36h32" stroke="var(--text-dim)" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <p class="upload-label">Drop your LabChart <code>.txt</code> export here</p>
+                <p class="upload-hint">or click to browse</p>
+                <input type="file" id="file-input" accept=".txt" hidden>
+            </div>
+            <div id="upload-progress" class="progress-bar" hidden>
+                <div class="progress-fill"></div>
+                <span class="progress-text">Processing...</span>
+            </div>
+            <div id="upload-error" class="error-msg" hidden></div>
+        </section>
+
+        <!-- Results Section -->
+        <section id="results-section" class="section" hidden>
+            <!-- File info bar -->
+            <div class="info-bar">
+                <div class="info-item">
+                    <span class="info-label">File</span>
+                    <span class="info-value" id="info-filename">—</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Date</span>
+                    <span class="info-value" id="info-date">—</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Rate</span>
+                    <span class="info-value" id="info-srate">—</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Epochs</span>
+                    <span class="info-value" id="info-epochs">—</span>
+                </div>
+            </div>
+
+            <!-- Power Summary Cards -->
+            <div class="power-cards">
+                <div class="power-card theta">
+                    <div class="card-header">
+                        <span class="band-label">θ Theta Power</span>
+                        <span class="channel-label" id="ch1-name">Fz-Pz</span>
+                    </div>
+                    <div class="card-values">
+                        <div class="val-group congruent">
+                            <span class="val-label">Congruent</span>
+                            <span class="val-number" id="theta-con">—</span>
+                        </div>
+                        <div class="val-divider"></div>
+                        <div class="val-group incongruent">
+                            <span class="val-label">Incongruent</span>
+                            <span class="val-number" id="theta-inc">—</span>
+                        </div>
+                    </div>
+                    <div class="card-bar">
+                        <div class="bar-con" id="theta-bar-con"></div>
+                        <div class="bar-inc" id="theta-bar-inc"></div>
+                    </div>
+                </div>
+                <div class="power-card beta">
+                    <div class="card-header">
+                        <span class="band-label">β Beta Power</span>
+                        <span class="channel-label" id="ch2-name">C3-C4</span>
+                    </div>
+                    <div class="card-values">
+                        <div class="val-group congruent">
+                            <span class="val-label">Congruent</span>
+                            <span class="val-number" id="beta-con">—</span>
+                        </div>
+                        <div class="val-divider"></div>
+                        <div class="val-group incongruent">
+                            <span class="val-label">Incongruent</span>
+                            <span class="val-number" id="beta-inc">—</span>
+                        </div>
+                    </div>
+                    <div class="card-bar">
+                        <div class="bar-con" id="beta-bar-con"></div>
+                        <div class="bar-inc" id="beta-bar-inc"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="charts-grid">
+                <div class="chart-panel">
+                    <h3>Averaged ERP — <span id="chart1-ch">Ch1</span></h3>
+                    <div id="chart-erp-ch1" class="chart-container"></div>
+                </div>
+                <div class="chart-panel">
+                    <h3>Averaged ERP — <span id="chart2-ch">Ch2</span></h3>
+                    <div id="chart-erp-ch2" class="chart-container"></div>
+                </div>
+                <div class="chart-panel">
+                    <h3>Power Spectrum — <span id="chart3-ch">Ch1</span></h3>
+                    <div id="chart-spec-ch1" class="chart-container"></div>
+                </div>
+                <div class="chart-panel">
+                    <h3>Power Spectrum — <span id="chart4-ch">Ch2</span></h3>
+                    <div id="chart-spec-ch2" class="chart-container"></div>
+                </div>
+                <div class="chart-panel full-width">
+                    <h3>Single-Trial Power Distribution</h3>
+                    <div id="chart-distribution" class="chart-container"></div>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="actions-bar">
+                <button id="btn-download" class="btn-primary">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <path d="M9 3v9M9 12L5 8M9 12l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    Download CSV for SPSS
+                </button>
+                <button id="btn-new" class="btn-secondary">Analyse Another File</button>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>EEG Flanker Analysis Tool · Data processed locally — nothing leaves your machine</p>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
