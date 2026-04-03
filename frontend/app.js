@@ -525,6 +525,14 @@ function initActions() {
         document.getElementById('compare-section').hidden = true;
         goToUpload();
     });
+
+    // Header click → go home (reset to upload view)
+    document.getElementById('header-home-link').addEventListener('click', (e) => {
+        e.preventDefault();
+        document.getElementById('compare-section').hidden = true;
+        document.getElementById('results-section').hidden = true;
+        goToUpload();
+    });
 }
 
 // ── Init ──
