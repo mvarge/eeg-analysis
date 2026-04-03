@@ -21,6 +21,7 @@ class Marker:
     time_seconds: float
     raw_text: str
     condition: str  # 'congruent', 'incongruent', 'block_start', 'block_end', 'key', 'end'
+    block: int = 0  # 1 or 2 (0 = unassigned)
 
 
 @dataclass
@@ -157,6 +158,9 @@ def parse_labchart(filepath: str) -> ParsedEEG:
     if second_positions:
         skip_indices.add(second_positions[0] - 1)  # Block 2 start (before first 'second')
 
+    # Determine block boundary: trials before first 'second' = block 1, after = block 2
+    block_boundary_idx = second_positions[0] if second_positions else len(stimulus_markers)
+
     trial_markers = []
     for i, m in enumerate(stimulus_markers):
         if i in skip_indices:
@@ -172,6 +176,9 @@ def parse_labchart(filepath: str) -> ParsedEEG:
             m.condition = "congruent"
         elif m.condition == "first":
             m.condition = "incongruent"
+
+        # Assign block number
+        m.block = 1 if i < block_boundary_idx else 2
 
         trial_markers.append(m)
 

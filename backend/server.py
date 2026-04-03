@@ -115,6 +115,7 @@ async def upload_eeg(file: UploadFile = File(...)):
             epoch_powers.append({
                 "trial": p.trial_index,
                 "condition": p.condition,
+                "block": p.block,
                 "theta_power": round(float(p.ch1_theta_power), 6),
                 "beta_power": round(float(p.ch2_beta_power), 6),
             })
@@ -255,14 +256,14 @@ async def compare_subjects():
 
 @app.get("/api/download-csv-all")
 async def download_csv_all():
-    """Download combined SPSS-ready CSV for all subjects."""
+    """Download combined SPSS-ready summary CSV for all subjects (one row per subject)."""
     if not _results:
         raise HTTPException(404, "No results. Upload files first.")
 
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "filename", "recording_date",
+        "subject", "recording_date",
         "theta_power_congruent", "theta_power_incongruent",
         "beta_power_congruent", "beta_power_incongruent",
         "n_epochs_congruent", "n_epochs_incongruent",
@@ -282,6 +283,65 @@ async def download_csv_all():
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=eeg_group_summary.csv"},
+    )
+
+
+@app.get("/api/download-csv-trials/{result_id}")
+async def download_csv_trials(result_id: str):
+    """Download trial-level CSV for one subject (one row per trial)."""
+    if result_id not in _results:
+        raise HTTPException(404, "Result not found. Please upload a file first.")
+
+    r = _results[result_id]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "subject", "recording_date", "trial", "block", "condition",
+        "theta_power", "beta_power",
+    ])
+    for p in r.power_results:
+        writer.writerow([
+            r.filename, r.recording_date,
+            p.trial_index + 1, p.block, p.condition,
+            round(float(p.ch1_theta_power), 6),
+            round(float(p.ch2_beta_power), 6),
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={result_id}_trials.csv"},
+    )
+
+
+@app.get("/api/download-csv-trials-all")
+async def download_csv_trials_all():
+    """Download trial-level CSV for all subjects (one row per trial per subject).
+    Ideal for SPSS — single table, sortable by subject, block, and condition."""
+    if not _results:
+        raise HTTPException(404, "No results. Upload files first.")
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "subject", "recording_date", "trial", "block", "condition",
+        "theta_power", "beta_power",
+    ])
+    for r in _results.values():
+        for p in r.power_results:
+            writer.writerow([
+                r.filename, r.recording_date,
+                p.trial_index + 1, p.block, p.condition,
+                round(float(p.ch1_theta_power), 6),
+                round(float(p.ch2_beta_power), 6),
+            ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=eeg_group_trials.csv"},
     )
 
 

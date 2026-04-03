@@ -21,6 +21,7 @@ class EpochData:
     """A single epoch of EEG data."""
     trial_index: int
     condition: str  # 'congruent' or 'incongruent'
+    block: int      # 1 or 2
     ch1_data: np.ndarray  # filtered, baseline-corrected
     ch2_data: np.ndarray
     times: np.ndarray  # time axis in seconds relative to stimulus
@@ -31,6 +32,7 @@ class PowerResult:
     """Power spectrum result for one epoch."""
     trial_index: int
     condition: str
+    block: int      # 1 or 2
     ch1_theta_power: float  # mean power 4-8 Hz
     ch2_beta_power: float   # mean power 13-30 Hz
     ch1_freqs: np.ndarray
@@ -123,6 +125,7 @@ def extract_epochs(parsed: ParsedEEG, pre_ms: float = 200.0, post_ms: float = 10
         epochs.append(EpochData(
             trial_index=i,
             condition=marker.condition,
+            block=marker.block,
             ch1_data=ch1_epoch,
             ch2_data=ch2_epoch,
             times=times,
@@ -158,6 +161,7 @@ def compute_power(epoch: EpochData, sfreq: float) -> PowerResult:
     return PowerResult(
         trial_index=epoch.trial_index,
         condition=epoch.condition,
+        block=epoch.block,
         ch1_theta_power=ch1_theta,
         ch2_beta_power=ch2_beta,
         ch1_freqs=freqs,

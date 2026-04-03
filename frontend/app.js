@@ -498,6 +498,12 @@ function initActions() {
         }
     });
 
+    document.getElementById('btn-download-trials').addEventListener('click', () => {
+        if (currentResultId) {
+            window.location.href = `${API}/api/download-csv-trials/${currentResultId}`;
+        }
+    });
+
     document.getElementById('btn-add-subject').addEventListener('click', () => goToUpload());
 
     document.getElementById('btn-compare').addEventListener('click', () => showComparison());
@@ -519,6 +525,10 @@ function initActions() {
 
     document.getElementById('btn-download-all').addEventListener('click', () => {
         window.location.href = `${API}/api/download-csv-all`;
+    });
+
+    document.getElementById('btn-download-trials-all').addEventListener('click', () => {
+        window.location.href = `${API}/api/download-csv-trials-all`;
     });
 
     document.getElementById('btn-add-more').addEventListener('click', () => {
