@@ -20,7 +20,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from parser import parse_labchart
 from pipeline import run_pipeline
 
+import math
 import numpy as np
+
+
+def sanitize_for_json(val):
+    """Replace NaN/Inf with None for JSON serialization."""
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    return val
 
 app = FastAPI(title="EEG Flanker Analysis")
 
@@ -119,10 +127,10 @@ async def upload_eeg(file: UploadFile = File(...)):
                 "recording_date": result.recording_date,
                 "sampling_rate": result.sampling_rate,
                 "channel_names": result.channel_names,
-                "theta_power_congruent": round(result.theta_power_congruent, 6),
-                "theta_power_incongruent": round(result.theta_power_incongruent, 6),
-                "beta_power_congruent": round(result.beta_power_congruent, 6),
-                "beta_power_incongruent": round(result.beta_power_incongruent, 6),
+                "theta_power_congruent": sanitize_for_json(round(result.theta_power_congruent, 6)),
+                "theta_power_incongruent": sanitize_for_json(round(result.theta_power_incongruent, 6)),
+                "beta_power_congruent": sanitize_for_json(round(result.beta_power_congruent, 6)),
+                "beta_power_incongruent": sanitize_for_json(round(result.beta_power_incongruent, 6)),
                 "n_epochs_congruent": result.n_epochs_congruent,
                 "n_epochs_incongruent": result.n_epochs_incongruent,
             },

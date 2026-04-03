@@ -113,48 +113,78 @@ function initUpload() {
     dropZone.addEventListener('drop', (e) => {
         e.preventDefault();
         dropZone.classList.remove('drag-over');
-        const file = e.dataTransfer.files[0];
-        if (file) uploadFile(file);
+        const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.txt'));
+        if (files.length > 0) uploadFiles(files);
     });
 
     fileInput.addEventListener('change', () => {
-        if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+        const files = Array.from(fileInput.files).filter(f => f.name.endsWith('.txt'));
+        if (files.length > 0) uploadFiles(files);
     });
 
-    async function uploadFile(file) {
+    async function uploadFiles(files) {
         errorEl.hidden = true;
         progress.hidden = false;
         const fill = progress.querySelector('.progress-fill');
+        const progressText = progress.querySelector('.progress-text');
         fill.classList.add('indeterminate');
-        progress.querySelector('.progress-text').textContent = `Processing ${file.name}...`;
 
-        const formData = new FormData();
-        formData.append('file', file);
+        const results = [];
+        let lastData = null;
 
-        try {
-            const resp = await fetch(`${API}/api/upload`, {
-                method: 'POST',
-                body: formData,
-            });
+        for (let i = 0; i < files.length; i++) {
+            progressText.textContent = `Processing ${files[i].name} (${i + 1}/${files.length})...`;
 
-            if (!resp.ok) {
-                const err = await resp.json();
-                throw new Error(err.detail || 'Upload failed');
+            const formData = new FormData();
+            formData.append('file', files[i]);
+
+            try {
+                const resp = await fetch(`${API}/api/upload`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(`${files[i].name}: ${err.detail || 'Upload failed'}`);
+                }
+
+                const data = await resp.json();
+                results.push(data);
+                lastData = data;
+
+                // Track subject
+                const s = data.summary;
+                if (!uploadedSubjects.find(sub => sub.result_id === data.result_id)) {
+                    uploadedSubjects.push({
+                        result_id: data.result_id,
+                        filename: s.filename,
+                    });
+                }
+
+            } catch (err) {
+                fill.classList.remove('indeterminate');
+                progress.hidden = true;
+                errorEl.textContent = err.message;
+                errorEl.hidden = false;
+                return;
             }
-
-            const data = await resp.json();
-            fill.classList.remove('indeterminate');
-            fill.style.width = '100%';
-            progress.querySelector('.progress-text').textContent = 'Done!';
-
-            setTimeout(() => showResults(data), 600);
-
-        } catch (err) {
-            fill.classList.remove('indeterminate');
-            progress.hidden = true;
-            errorEl.textContent = err.message;
-            errorEl.hidden = false;
         }
+
+        fill.classList.remove('indeterminate');
+        fill.style.width = '100%';
+        progressText.textContent = `Done! ${results.length} file${results.length > 1 ? 's' : ''} processed.`;
+
+        setTimeout(() => {
+            if (results.length === 1) {
+                // Single file → individual view
+                showResults(lastData);
+            } else {
+                // Multiple files → straight to comparison
+                document.getElementById('upload-section').hidden = true;
+                showComparison();
+            }
+        }, 600);
     }
 }
 
