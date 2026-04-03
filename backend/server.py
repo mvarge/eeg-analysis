@@ -182,6 +182,101 @@ async def download_csv(result_id: str):
     )
 
 
+@app.get("/api/subjects")
+async def list_subjects():
+    """List all uploaded subjects."""
+    subjects = []
+    for rid, r in _results.items():
+        subjects.append({
+            "result_id": rid,
+            "filename": r.filename,
+            "recording_date": r.recording_date,
+            "sampling_rate": r.sampling_rate,
+            "n_epochs_congruent": r.n_epochs_congruent,
+            "n_epochs_incongruent": r.n_epochs_incongruent,
+        })
+    return {"subjects": subjects}
+
+
+@app.delete("/api/subjects/{result_id}")
+async def remove_subject(result_id: str):
+    """Remove a subject from memory."""
+    if result_id in _results:
+        del _results[result_id]
+    return {"status": "ok"}
+
+
+@app.get("/api/compare")
+async def compare_subjects():
+    """Compare all uploaded subjects — returns summary + power data for group charts."""
+    if len(_results) < 2:
+        raise HTTPException(400, "Need at least 2 subjects to compare. Upload more files.")
+
+    subjects = []
+    for rid, r in _results.items():
+        # Waveforms downsampled
+        epoch_times_ds, avg_ch1_con_ds = downsample_pair(
+            r.epoch_times * 1000, r.avg_ch1_congruent
+        )
+        _, avg_ch1_inc_ds = downsample_pair(r.epoch_times * 1000, r.avg_ch1_incongruent)
+        _, avg_ch2_con_ds = downsample_pair(r.epoch_times * 1000, r.avg_ch2_congruent)
+        _, avg_ch2_inc_ds = downsample_pair(r.epoch_times * 1000, r.avg_ch2_incongruent)
+
+        subjects.append({
+            "result_id": rid,
+            "filename": r.filename,
+            "recording_date": r.recording_date,
+            "channel_names": r.channel_names,
+            "theta_power_congruent": round(r.theta_power_congruent, 6),
+            "theta_power_incongruent": round(r.theta_power_incongruent, 6),
+            "beta_power_congruent": round(r.beta_power_congruent, 6),
+            "beta_power_incongruent": round(r.beta_power_incongruent, 6),
+            "n_epochs_congruent": r.n_epochs_congruent,
+            "n_epochs_incongruent": r.n_epochs_incongruent,
+            "waveforms": {
+                "times_ms": epoch_times_ds,
+                "ch1_congruent": avg_ch1_con_ds,
+                "ch1_incongruent": avg_ch1_inc_ds,
+                "ch2_congruent": avg_ch2_con_ds,
+                "ch2_incongruent": avg_ch2_inc_ds,
+            },
+        })
+
+    return {"subjects": subjects}
+
+
+@app.get("/api/download-csv-all")
+async def download_csv_all():
+    """Download combined SPSS-ready CSV for all subjects."""
+    if not _results:
+        raise HTTPException(404, "No results. Upload files first.")
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "filename", "recording_date",
+        "theta_power_congruent", "theta_power_incongruent",
+        "beta_power_congruent", "beta_power_incongruent",
+        "n_epochs_congruent", "n_epochs_incongruent",
+    ])
+    for r in _results.values():
+        writer.writerow([
+            r.filename, r.recording_date,
+            round(r.theta_power_congruent, 6),
+            round(r.theta_power_incongruent, 6),
+            round(r.beta_power_congruent, 6),
+            round(r.beta_power_incongruent, 6),
+            r.n_epochs_congruent, r.n_epochs_incongruent,
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=eeg_group_summary.csv"},
+    )
+
+
 # Serve frontend
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

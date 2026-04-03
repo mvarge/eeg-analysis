@@ -4,6 +4,13 @@
 
 const API = window.location.origin;
 let currentResultId = null;
+let uploadedSubjects = [];  // Track all uploaded subjects
+
+// Subject color palette for comparison charts
+const SUBJECT_COLORS = [
+    '#5eead4', '#f472b6', '#818cf8', '#fb923c', '#a3e635',
+    '#38bdf8', '#e879f9', '#fbbf24', '#f87171', '#34d399',
+];
 
 // ── Plotly theme ──
 const plotlyLayout = {
@@ -196,6 +203,16 @@ function showResults(data) {
     renderSpectrumChart('chart-spec-ch1', data.spectra.freqs, data.spectra.ch1_congruent, data.spectra.ch1_incongruent, 'Power (µV²/Hz)', [4, 8]);
     renderSpectrumChart('chart-spec-ch2', data.spectra.freqs, data.spectra.ch2_congruent, data.spectra.ch2_incongruent, 'Power (µV²/Hz)', [13, 30]);
     renderDistributionChart('chart-distribution', data.epoch_powers);
+
+    // Track this subject
+    if (!uploadedSubjects.find(s => s.result_id === data.result_id)) {
+        uploadedSubjects.push({
+            result_id: data.result_id,
+            filename: s.filename,
+        });
+    }
+    updateSubjectList();
+    updateCompareButton();
 }
 
 function renderERPChart(containerId, times, conData, incData, yLabel) {
@@ -303,6 +320,146 @@ function renderDistributionChart(containerId, epochPowers) {
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
 }
 
+// ── Subject list management ──
+function updateSubjectList() {
+    const listEl = document.getElementById('subject-list');
+    const itemsEl = document.getElementById('subject-items');
+    if (uploadedSubjects.length > 1) {
+        listEl.hidden = false;
+        itemsEl.innerHTML = uploadedSubjects.map((s, i) => `
+            <span class="subject-chip">
+                <span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]}"></span>
+                ${s.filename}
+                <button class="chip-remove" data-id="${s.result_id}" title="Remove">×</button>
+            </span>
+        `).join('');
+        itemsEl.querySelectorAll('.chip-remove').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                const id = e.target.dataset.id;
+                await fetch(`${API}/api/subjects/${id}`, { method: 'DELETE' });
+                uploadedSubjects = uploadedSubjects.filter(s => s.result_id !== id);
+                updateSubjectList();
+                updateCompareButton();
+            });
+        });
+    } else {
+        listEl.hidden = true;
+    }
+}
+
+function updateCompareButton() {
+    const btn = document.getElementById('btn-compare');
+    btn.disabled = uploadedSubjects.length < 2;
+    btn.textContent = uploadedSubjects.length < 2
+        ? 'Compare Subjects'
+        : `Compare ${uploadedSubjects.length} Subjects`;
+}
+
+// ── Comparison view ──
+async function showComparison() {
+    try {
+        const resp = await fetch(`${API}/api/compare`);
+        if (!resp.ok) {
+            const err = await resp.json();
+            alert(err.detail || 'Comparison failed');
+            return;
+        }
+        const data = await resp.json();
+        const subjects = data.subjects;
+
+        document.getElementById('results-section').hidden = true;
+        document.getElementById('compare-section').hidden = false;
+
+        // Build comparison table
+        const thead = document.querySelector('#compare-table thead');
+        const tbody = document.querySelector('#compare-table tbody');
+        thead.innerHTML = `<tr>
+            <th></th><th>Subject</th><th>Date</th>
+            <th>θ Con</th><th>θ Inc</th>
+            <th>β Con</th><th>β Inc</th>
+            <th>Epochs</th>
+        </tr>`;
+        tbody.innerHTML = subjects.map((s, i) => `<tr>
+            <td><span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]};display:inline-block;width:8px;height:8px;border-radius:50%"></span></td>
+            <td>${s.filename}</td>
+            <td>${s.recording_date}</td>
+            <td class="val-con">${s.theta_power_congruent.toFixed(2)}</td>
+            <td class="val-inc">${s.theta_power_incongruent.toFixed(2)}</td>
+            <td class="val-con">${s.beta_power_congruent.toFixed(2)}</td>
+            <td class="val-inc">${s.beta_power_incongruent.toFixed(2)}</td>
+            <td>${s.n_epochs_congruent + s.n_epochs_incongruent}</td>
+        </tr>`).join('');
+
+        // Theta grouped bar chart
+        renderGroupedBar('chart-compare-theta', subjects, 'theta_power_congruent', 'theta_power_incongruent', 'θ Power (µV²/Hz)');
+        // Beta grouped bar chart
+        renderGroupedBar('chart-compare-beta', subjects, 'beta_power_congruent', 'beta_power_incongruent', 'β Power (µV²/Hz)');
+        // Overlaid ERPs
+        renderOverlaidERP('chart-compare-erp-ch1-con', subjects, 'ch1_congruent', 'Congruent — Amplitude (µV)');
+        renderOverlaidERP('chart-compare-erp-ch1-inc', subjects, 'ch1_incongruent', 'Incongruent — Amplitude (µV)');
+
+    } catch (err) {
+        alert('Error loading comparison: ' + err.message);
+    }
+}
+
+function renderGroupedBar(containerId, subjects, conKey, incKey, yLabel) {
+    const names = subjects.map(s => s.result_id);
+    const traces = [
+        {
+            x: names, y: subjects.map(s => s[conKey]),
+            name: 'Congruent', type: 'bar',
+            marker: { color: CON_COLOR, opacity: 0.8 },
+        },
+        {
+            x: names, y: subjects.map(s => s[incKey]),
+            name: 'Incongruent', type: 'bar',
+            marker: { color: INC_COLOR, opacity: 0.8 },
+        },
+    ];
+    const layout = {
+        ...plotlyLayout,
+        barmode: 'group',
+        bargap: 0.3,
+        bargroupgap: 0.1,
+        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
+        hovermode: 'closest',
+    };
+    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
+}
+
+function renderOverlaidERP(containerId, subjects, waveKey, yLabel) {
+    const traces = subjects.map((s, i) => ({
+        x: s.waveforms.times_ms,
+        y: s.waveforms[waveKey],
+        name: s.result_id,
+        type: 'scatter', mode: 'lines',
+        line: { color: SUBJECT_COLORS[i % SUBJECT_COLORS.length], width: 1.5 },
+    }));
+    const layout = {
+        ...plotlyLayout,
+        xaxis: { ...plotlyLayout.xaxis, title: { text: 'Time (ms)', font: { size: 10 } },
+            showspikes: true, spikemode: 'across', spikethickness: 0.5,
+            spikecolor: 'rgba(94,234,212,0.2)', spikedash: 'dot' },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
+        shapes: [{
+            type: 'line', x0: 0, x1: 0, y0: 0, y1: 1, yref: 'paper',
+            line: { color: 'rgba(94,234,212,0.3)', width: 1, dash: 'dot' },
+        }],
+    };
+    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
+}
+
+// ── Navigation helpers ──
+function goToUpload() {
+    document.getElementById('results-section').hidden = true;
+    document.getElementById('compare-section').hidden = true;
+    document.getElementById('upload-section').hidden = false;
+    document.getElementById('upload-progress').hidden = true;
+    document.getElementById('file-input').value = '';
+}
+
 // ── Actions ──
 function initActions() {
     document.getElementById('btn-download').addEventListener('click', () => {
@@ -311,12 +468,32 @@ function initActions() {
         }
     });
 
-    document.getElementById('btn-new').addEventListener('click', () => {
-        document.getElementById('results-section').hidden = true;
-        document.getElementById('upload-section').hidden = false;
-        document.getElementById('upload-progress').hidden = true;
-        document.getElementById('file-input').value = '';
+    document.getElementById('btn-add-subject').addEventListener('click', () => goToUpload());
+
+    document.getElementById('btn-compare').addEventListener('click', () => showComparison());
+
+    document.getElementById('btn-new').addEventListener('click', async () => {
+        // Clear all subjects from server
+        for (const s of uploadedSubjects) {
+            await fetch(`${API}/api/subjects/${s.result_id}`, { method: 'DELETE' });
+        }
+        uploadedSubjects = [];
         currentResultId = null;
+        goToUpload();
+    });
+
+    document.getElementById('btn-back-individual').addEventListener('click', () => {
+        document.getElementById('compare-section').hidden = true;
+        document.getElementById('results-section').hidden = false;
+    });
+
+    document.getElementById('btn-download-all').addEventListener('click', () => {
+        window.location.href = `${API}/api/download-csv-all`;
+    });
+
+    document.getElementById('btn-add-more').addEventListener('click', () => {
+        document.getElementById('compare-section').hidden = true;
+        goToUpload();
     });
 }
 
