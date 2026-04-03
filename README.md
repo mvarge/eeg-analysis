@@ -19,7 +19,7 @@ A simple web app that analyses EEG data from an **Eriksen Flanker Task** experim
    - Extracts theta (4–8 Hz) and beta (13–30 Hz) power
 3. **Shows interactive charts**: averaged ERPs, power spectra, and single-trial distributions
 4. **Compares subjects**: upload multiple files to see group comparison charts
-5. **Downloads a CSV** with all the summary values, ready to paste into SPSS
+5. **Downloads CSVs** — both summary and trial-level exports with block tracking, ready for SPSS
 
 ---
 
@@ -80,7 +80,9 @@ Go to: **[http://localhost:8000](http://localhost:8000)**
 
 **5. Download results**
 
-Click the **"Download CSV for SPSS"** button to get your summary file.
+Two CSV export options are available (both for individual and group views):
+- **Summary CSV** — one row per subject with averaged power values
+- **Trial-Level CSV** — one row per trial, including block number and condition (ideal for SPSS repeated-measures analysis)
 
 **6. To stop the app**
 
@@ -104,18 +106,34 @@ This creates 3 fake subject files in `data/` that you can upload to test the too
 
 ---
 
-## 📊 What's in the Output CSV
+## 📊 What's in the Output CSVs
+
+### Summary CSV (one row per subject)
 
 | Column | What it means |
 |--------|--------------|
-| `filename` | Which file this row is from |
+| `subject` | Subject identifier (from filename) |
 | `recording_date` | When the EEG was recorded |
-| `theta_power_congruent` | Average theta power (4-8 Hz) for congruent trials |
-| `theta_power_incongruent` | Average theta power (4-8 Hz) for incongruent trials |
-| `beta_power_congruent` | Average beta power (13-30 Hz) for congruent trials |
-| `beta_power_incongruent` | Average beta power (13-30 Hz) for incongruent trials |
+| `theta_power_congruent` | Average theta power (4–8 Hz) for congruent trials |
+| `theta_power_incongruent` | Average theta power (4–8 Hz) for incongruent trials |
+| `beta_power_congruent` | Average beta power (13–30 Hz) for congruent trials |
+| `beta_power_incongruent` | Average beta power (13–30 Hz) for incongruent trials |
 | `n_epochs_congruent` | Number of congruent trials used |
 | `n_epochs_incongruent` | Number of incongruent trials used |
+
+### Trial-Level CSV (one row per trial — best for SPSS)
+
+| Column | What it means |
+|--------|--------------|
+| `subject` | Subject identifier (from filename) |
+| `recording_date` | When the EEG was recorded |
+| `trial` | Trial number (1–160) |
+| `block` | Block number (1 or 2 — 80 trials each) |
+| `condition` | `congruent` or `incongruent` |
+| `theta_power` | Theta power (4–8 Hz) for this trial |
+| `beta_power` | Beta power (13–30 Hz) for this trial |
+
+> 💡 The trial-level CSV is ideal for SPSS — it's a single flat table you can sort/filter by subject, block, and condition. Use this for repeated-measures ANOVA or mixed-effects models.
 
 ---
 
@@ -135,7 +153,7 @@ This creates 3 fake subject files in `data/` that you can upload to test the too
 For the curious — the processing pipeline:
 
 - **Parser**: Reads LabChart 8 text exports (Latin-1 encoding, tab-delimited)
-- **Marker handling**: Corrects known mislabelling (`first` → incongruent)
+- **Marker handling**: Corrects known mislabelling (`first` → incongruent), tracks block boundaries
 - **Filtering**: 1–40 Hz bandpass via MNE-Python
 - **Epoching**: -200ms to +1000ms around stimulus onset
 - **Baseline correction**: Subtracts mean of -200ms to 0ms window
