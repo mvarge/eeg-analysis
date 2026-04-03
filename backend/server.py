@@ -81,8 +81,8 @@ async def upload_eeg(file: UploadFile = File(...)):
     try:
         # Parse
         parsed = parse_labchart(tmp_path)
-        # Override filename with the original upload name
-        parsed.filename = file.filename
+        # Override filename with the original upload name (strip .txt extension)
+        parsed.filename = file.filename.replace(".txt", "")
 
         # Run pipeline
         result = run_pipeline(parsed)
