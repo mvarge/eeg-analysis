@@ -13,9 +13,8 @@ venv/
 data/*.txt
 data/*.csv
 
-# Private docs (developer briefs, notes with personal info)
-docs/EEG_Developer_Brief_v23.docx
-docs/*.docx
+# Private docs (developer briefs, notes, findings — all internal)
+docs/
 
 # OS
 .DS_Store
