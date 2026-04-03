@@ -54,7 +54,7 @@ chmod +x run.sh               # make the run script executable (first time only)
 ./run.sh                       # start the app
 ```
 
-The first time you run it, it will automatically install everything it needs (takes about 30 seconds). You'll see:
+The first time you run it, the script will automatically create a Python virtual environment and install all required packages (MNE, SciPy, FastAPI, etc.) — takes about 30 seconds. You'll see:
 ```
   ╔══════════════════════════════════════╗
   ║     EEG Flanker Analysis Tool        ║
