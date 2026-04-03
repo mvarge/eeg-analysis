@@ -215,8 +215,8 @@ function renderERPChart(containerId, times, conData, incData, yLabel) {
     const layout = {
         ...plotlyLayout,
         xaxis: { ...plotlyLayout.xaxis, title: { text: 'Time (ms)', font: { size: 10 } },
-            showspikes: true, spikemode: 'across', spikethickness: 1,
-            spikecolor: 'rgba(94,234,212,0.4)', spikedash: 'dot' },
+            showspikes: true, spikemode: 'across', spikethickness: 0.5,
+            spikecolor: 'rgba(94,234,212,0.2)', spikedash: 'dot' },
         yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
         shapes: [{
             type: 'line', x0: 0, x1: 0, y0: 0, y1: 1, yref: 'paper',
@@ -246,8 +246,8 @@ function renderSpectrumChart(containerId, freqs, conData, incData, yLabel, bandR
     const layout = {
         ...plotlyLayout,
         xaxis: { ...plotlyLayout.xaxis, title: { text: 'Frequency (Hz)', font: { size: 10 } }, range: [0, 45],
-            showspikes: true, spikemode: 'across', spikethickness: 1,
-            spikecolor: 'rgba(94,234,212,0.4)', spikedash: 'dot' },
+            showspikes: true, spikemode: 'across', spikethickness: 0.5,
+            spikecolor: 'rgba(94,234,212,0.2)', spikedash: 'dot' },
         yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
         shapes: [{
             type: 'rect',
