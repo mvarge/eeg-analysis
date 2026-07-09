@@ -141,6 +141,22 @@ def _summary_payload(r: PipelineResult) -> dict:
 
 
 def _channel_payload(s: ChannelSummary) -> dict:
+    by_block = {}
+    for blk, b in (s.by_block or {}).items():
+        by_block[str(blk)] = {
+            "n_total_con": b["n_total_con"],
+            "n_total_inc": b["n_total_inc"],
+            "n_surv_con": b["n_surv_con"],
+            "n_surv_inc": b["n_surv_inc"],
+            "n_exc_con": b["n_exc_con"],
+            "n_exc_inc": b["n_exc_inc"],
+            "exclusion_pct_con": _safe(round(b["exclusion_pct_con"], 1)),
+            "exclusion_pct_inc": _safe(round(b["exclusion_pct_inc"], 1)),
+            "abs_median_con": _safe(round(b["abs_median_con"], 3)),
+            "abs_median_inc": _safe(round(b["abs_median_inc"], 3)),
+            "rel_median_con": _safe(round(b["rel_median_con"], 4)),
+            "rel_median_inc": _safe(round(b["rel_median_inc"], 4)),
+        }
     return {
         "channel": s.channel,
         "band": s.band,
@@ -155,6 +171,7 @@ def _channel_payload(s: ChannelSummary) -> dict:
         "abs_median_inc": _safe(round(s.abs_median_inc, 3)),
         "rel_median_con": _safe(round(s.rel_median_con, 4)),
         "rel_median_inc": _safe(round(s.rel_median_inc, 4)),
+        "by_block": by_block,
     }
 
 
@@ -473,7 +490,31 @@ SUMMARY_HEADER = [
     "theta_exclusion_pct_con", "theta_exclusion_pct_inc", "theta_balance_flag",
     "beta_exclusion_pct_con",  "beta_exclusion_pct_inc",  "beta_balance_flag",
     "block1_hz", "block2_hz",
+    # Per-block breakdowns (theta then beta, blocks 1..2, rel then abs, con then inc)
+    "theta_b1_surv_con", "theta_b1_surv_inc", "theta_b1_exc_con", "theta_b1_exc_inc",
+    "theta_b1_rel_median_con", "theta_b1_rel_median_inc",
+    "theta_b1_abs_median_con", "theta_b1_abs_median_inc",
+    "theta_b2_surv_con", "theta_b2_surv_inc", "theta_b2_exc_con", "theta_b2_exc_inc",
+    "theta_b2_rel_median_con", "theta_b2_rel_median_inc",
+    "theta_b2_abs_median_con", "theta_b2_abs_median_inc",
+    "beta_b1_surv_con", "beta_b1_surv_inc", "beta_b1_exc_con", "beta_b1_exc_inc",
+    "beta_b1_rel_median_con", "beta_b1_rel_median_inc",
+    "beta_b1_abs_median_con", "beta_b1_abs_median_inc",
+    "beta_b2_surv_con", "beta_b2_surv_inc", "beta_b2_exc_con", "beta_b2_exc_inc",
+    "beta_b2_rel_median_con", "beta_b2_rel_median_inc",
+    "beta_b2_abs_median_con", "beta_b2_abs_median_inc",
 ]
+
+
+def _block_cells(summary: ChannelSummary, blk: int) -> list:
+    b = (summary.by_block or {}).get(blk)
+    if not b:
+        return ["", "", "", "", "", "", "", ""]
+    return [
+        b["n_surv_con"], b["n_surv_inc"], b["n_exc_con"], b["n_exc_inc"],
+        round(b["rel_median_con"], 6), round(b["rel_median_inc"], 6),
+        round(b["abs_median_con"], 6), round(b["abs_median_inc"], 6),
+    ]
 
 
 def _summary_row(r: PipelineResult, demo_cols=None) -> list:
@@ -494,6 +535,11 @@ def _summary_row(r: PipelineResult, demo_cols=None) -> list:
         demo.block_order.get(1, "") if demo else "",
         demo.block_order.get(2, "") if demo else "",
     ]
+    # Per-block breakdowns
+    row.extend(_block_cells(ts, 1))
+    row.extend(_block_cells(ts, 2))
+    row.extend(_block_cells(bs, 1))
+    row.extend(_block_cells(bs, 2))
     row.extend(_demographic_values(r.filename, demo_cols))
     return row
 

@@ -586,6 +586,112 @@ main {
     border: 1px solid rgba(251, 191, 36, 0.2);
 }
 
+/* Per-block breakdown inside power cards */
+.card-blocks {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.card-blocks-header {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    opacity: 0.7;
+}
+
+.card-block-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.55rem 0.65rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+}
+
+.card-block-label {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    letter-spacing: 0.03em;
+}
+
+.card-block-values {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.card-block-values .val-group {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex: 1;
+}
+
+.card-block-values .val-label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    min-width: 1.75rem;
+}
+
+.card-block-values .val-number {
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.card-block-values .val-group.congruent .val-number { color: var(--congruent); }
+.card-block-values .val-group.incongruent .val-number { color: var(--incongruent); }
+
+.card-block-values .val-secondary {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    opacity: 0.75;
+}
+
+.card-block-values .val-divider {
+    width: 1px;
+    align-self: stretch;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.card-block-bar {
+    display: flex;
+    gap: 2px;
+    height: 3px;
+    justify-content: center;
+    align-items: stretch;
+    overflow: hidden;
+}
+
+.card-block-bar .bar-con,
+.card-block-bar .bar-inc {
+    height: 100%;
+    border-radius: 1px;
+}
+
+.card-block-bar .bar-con { background: var(--congruent); }
+.card-block-bar .bar-inc { background: var(--incongruent); }
+
+.card-block-footer {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    opacity: 0.8;
+}
+
 /* Excluded trials section */
 .excluded-section {
     margin: 2rem 0 1.5rem;

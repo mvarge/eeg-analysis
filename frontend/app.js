@@ -337,9 +337,9 @@ function showResults(data) {
     renderDemographicsPanel(s.demographics);
 
     // Theta card
-    setCard('theta', s.theta);
+    setCard('theta', s.theta, s.demographics);
     // Beta card
-    setCard('beta', s.beta);
+    setCard('beta', s.beta, s.demographics);
 
     // Charts
     // Precompute per-trial condition + exclusion arrays (aligned to spectra rows)
@@ -381,7 +381,7 @@ function showResults(data) {
     updateCompareButton();
 }
 
-function setCard(prefix, band) {
+function setCard(prefix, band, demographics) {
     const relCon = band.rel_median_con ?? 0;
     const relInc = band.rel_median_inc ?? 0;
     const absCon = band.abs_median_con ?? 0;
@@ -402,6 +402,57 @@ function setCard(prefix, band) {
 
     const flag = document.getElementById(`${prefix}-balance`);
     flag.hidden = !band.balance_flag;
+
+    // Per-block breakdown (only render when 2+ blocks)
+    const blocksEl = document.getElementById(`${prefix}-blocks`);
+    if (!blocksEl) return;
+    const byBlock = band.by_block || {};
+    const blockKeys = Object.keys(byBlock).sort((a, b) => Number(a) - Number(b));
+    if (blockKeys.length < 2) {
+        blocksEl.innerHTML = '';
+        return;
+    }
+    const blockOrder = (demographics && demographics.block_order) || {};
+    const overallMax = Math.max(
+        ...blockKeys.flatMap(k => [byBlock[k].rel_median_con, byBlock[k].rel_median_inc]),
+        0.001
+    );
+    blocksEl.innerHTML = `
+        <div class="card-blocks-header">Per-block breakdown</div>
+        ${blockKeys.map(k => {
+            const b = byBlock[k];
+            const label = blockOrder[k] ? `Block ${k} · ${escapeHtml(blockOrder[k])}` : `Block ${k}`;
+            const nSurv = b.n_surv_con + b.n_surv_inc;
+            const nTot = b.n_total_con + b.n_total_inc;
+            const cWidth = (b.rel_median_con / overallMax) * 50;
+            const iWidth = (b.rel_median_inc / overallMax) * 50;
+            return `
+                <div class="card-block-row">
+                    <div class="card-block-label">${label}</div>
+                    <div class="card-block-values">
+                        <div class="val-group congruent">
+                            <span class="val-label">Con</span>
+                            <span class="val-number">${b.rel_median_con.toFixed(3)}</span>
+                            <span class="val-secondary">abs ${b.abs_median_con.toFixed(2)}</span>
+                        </div>
+                        <div class="val-divider"></div>
+                        <div class="val-group incongruent">
+                            <span class="val-label">Inc</span>
+                            <span class="val-number">${b.rel_median_inc.toFixed(3)}</span>
+                            <span class="val-secondary">abs ${b.abs_median_inc.toFixed(2)}</span>
+                        </div>
+                    </div>
+                    <div class="card-block-bar">
+                        <div class="bar-con" style="width:${cWidth}%"></div>
+                        <div class="bar-inc" style="width:${iWidth}%"></div>
+                    </div>
+                    <div class="card-block-footer">
+                        ${nSurv}/${nTot} surviving · con ${b.exclusion_pct_con}% / inc ${b.exclusion_pct_inc}% excluded
+                    </div>
+                </div>
+            `;
+        }).join('')}
+    `;
 }
 
 // ── Wavelet spectrum chart ──

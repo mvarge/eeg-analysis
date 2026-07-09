@@ -102,6 +102,12 @@ class ChannelSummary:
     abs_median_inc: float
     rel_median_con: float
     rel_median_inc: float
+    # per-block breakdown: {block_number: {'n_total_con', 'n_total_inc',
+    #     'n_surv_con', 'n_surv_inc', 'n_exc_con', 'n_exc_inc',
+    #     'exclusion_pct_con', 'exclusion_pct_inc',
+    #     'abs_median_con', 'abs_median_inc',
+    #     'rel_median_con', 'rel_median_inc'}}
+    by_block: dict
 
 
 @dataclass
@@ -371,6 +377,37 @@ def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude
         vals = [getattr(t, attr) for t in surviving if t.cond == cond]
         return float(np.median(vals)) if vals else 0.0
 
+    # Per-block breakdown
+    by_block: dict = {}
+    for blk in sorted({t.block for t in trials}):
+        trials_blk = [t for t in trials if t.block == blk]
+        surv_blk = [t for t in surviving if t.block == blk]
+        n_tot_con = sum(1 for t in trials_blk if t.cond == "con")
+        n_tot_inc = sum(1 for t in trials_blk if t.cond == "first")
+        n_surv_con = sum(1 for t in surv_blk if t.cond == "con")
+        n_surv_inc = sum(1 for t in surv_blk if t.cond == "first")
+        n_exc_con = n_tot_con - n_surv_con
+        n_exc_inc = n_tot_inc - n_surv_inc
+
+        def _median_blk(cond: str, attr: str) -> float:
+            vals = [getattr(t, attr) for t in surv_blk if t.cond == cond]
+            return float(np.median(vals)) if vals else 0.0
+
+        by_block[blk] = {
+            "n_total_con": n_tot_con,
+            "n_total_inc": n_tot_inc,
+            "n_surv_con": n_surv_con,
+            "n_surv_inc": n_surv_inc,
+            "n_exc_con": n_exc_con,
+            "n_exc_inc": n_exc_inc,
+            "exclusion_pct_con": (100.0 * n_exc_con / n_tot_con) if n_tot_con else 0.0,
+            "exclusion_pct_inc": (100.0 * n_exc_inc / n_tot_inc) if n_tot_inc else 0.0,
+            "abs_median_con": _median_blk("con", abs_attr),
+            "abs_median_inc": _median_blk("first", abs_attr),
+            "rel_median_con": _median_blk("con", rel_attr),
+            "rel_median_inc": _median_blk("first", rel_attr),
+        }
+
     return ChannelSummary(
         channel=channel, band=band,
         surviving=len(surviving), excluded=len(excluded),
@@ -382,4 +419,5 @@ def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude
         abs_median_inc=_median("first", abs_attr),
         rel_median_con=_median("con",   rel_attr),
         rel_median_inc=_median("first", rel_attr),
+        by_block=by_block,
     )
