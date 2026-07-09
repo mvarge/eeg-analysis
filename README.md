@@ -99,9 +99,11 @@ Click the **header/logo** at any time to return to the upload screen.
 
 ### What You Need First
 
-- **Python 3.10 or newer** — check by opening Terminal and typing `python3 --version`
-  - If you don't have it: go to [python.org/downloads](https://www.python.org/downloads/) and install the latest version
-- **A web browser** (Chrome, Firefox, Safari — anything works)
+- **Python 3.10 or newer**
+  - **Mac / Linux:** open Terminal and type `python3 --version`
+  - **Windows:** open Command Prompt (or PowerShell) and type `python --version`
+  - If you don't have it: go to [python.org/downloads](https://www.python.org/downloads/) and install the latest version. **On Windows, tick "Add Python to PATH" during installation.**
+- **A web browser** (Chrome, Firefox, Safari, Edge — anything works)
 
 ### Step-by-Step
 
@@ -109,13 +111,15 @@ Click the **header/logo** at any time to return to the upload screen.
 
 Click the green **Code** button on GitHub → **Download ZIP** → unzip it somewhere easy to find (like your Desktop).
 
-Or if you're comfortable with Terminal:
+Or if you're comfortable with a terminal:
 ```bash
 git clone https://github.com/mvarge/eeg-analysis.git
 cd eeg-analysis
 ```
 
 **2. Run it**
+
+#### On macOS / Linux
 
 Open **Terminal** (on Mac: press `Cmd + Space`, type "Terminal", hit Enter).
 
@@ -125,6 +129,25 @@ cd ~/Desktop/eeg-analysis    # or wherever you unzipped it
 chmod +x run.sh               # make the run script executable (first time only)
 ./run.sh                       # start the app
 ```
+
+#### On Windows
+
+Open **File Explorer**, navigate to the unzipped `eeg-analysis` folder, and **double-click `run.bat`**.
+
+Or from Command Prompt / PowerShell:
+```cmd
+cd %USERPROFILE%\Desktop\eeg-analysis
+run.bat
+```
+
+PowerShell users can alternatively run:
+```powershell
+.\run.ps1
+```
+(If PowerShell blocks the script the first time, run once:
+`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`)
+
+---
 
 The first time you run it, the script will automatically create a Python virtual environment and install all required packages (MNE, SciPy, FastAPI, etc.) — takes about 30 seconds. You'll see:
 ```
@@ -158,7 +181,7 @@ Two CSV export options are available (both for individual and group views):
 
 **6. To stop the app**
 
-Go back to Terminal and press **Ctrl + C**.
+Go back to the terminal window (Terminal on Mac/Linux, or the Command Prompt/PowerShell window that opened on Windows) and press **Ctrl + C**.
 
 ---
 
@@ -176,9 +199,17 @@ Each file should contain:
 ### Test Data
 
 Want to try it without real data? Generate fake test files:
+
+**macOS / Linux:**
 ```bash
 .venv/bin/python scripts/generate_fake_data.py
 ```
+
+**Windows:**
+```cmd
+.venv\Scripts\python scripts\generate_fake_data.py
+```
+
 This creates fake subject files in `data/` that you can upload to test the tool.
 
 ---
@@ -218,10 +249,12 @@ This creates fake subject files in `data/` that you can upload to test the tool.
 
 | Problem | Solution |
 |---------|----------|
-| `python3: command not found` | Install Python from [python.org/downloads](https://www.python.org/downloads/) |
-| `permission denied: ./run.sh` | Run `chmod +x run.sh` first |
-| `no matching distribution for scipy` | Delete `.venv/` folder and run `./run.sh` again |
-| Page won't load | Make sure Terminal is still running and shows the server message |
+| `python3: command not found` (Mac/Linux) | Install Python from [python.org/downloads](https://www.python.org/downloads/) |
+| `'python' is not recognized...` (Windows) | Reinstall Python and tick **Add Python to PATH**, or install from the Microsoft Store |
+| `permission denied: ./run.sh` (Mac/Linux) | Run `chmod +x run.sh` first |
+| `run.ps1 cannot be loaded because running scripts is disabled` (Windows) | Run once: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` — or just use `run.bat` instead |
+| `no matching distribution for scipy` | Delete the `.venv` folder and run the script again |
+| Page won't load | Make sure the terminal window is still running and shows the server message |
 | Upload error | Make sure you're uploading a `.txt` file exported from LabChart |
 
 ---
