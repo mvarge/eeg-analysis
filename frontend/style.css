@@ -209,6 +209,155 @@ main {
     animation: progressSlide 1.2s ease-in-out infinite;
 }
 
+/* Demographics upload box (below drop-zone on upload screen) */
+.demographics-upload {
+    margin-top: 1.2rem;
+    padding: 0.9rem 1.2rem;
+    background: var(--bg-card);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    animation: fadeUp 0.5s ease both 0.3s;
+    flex-wrap: wrap;
+}
+.demo-upload-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+    flex: 1;
+}
+.demo-upload-title {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--text);
+    font-weight: 500;
+}
+.demo-upload-opt {
+    color: var(--text-dim);
+    font-weight: 400;
+    font-size: 0.7rem;
+}
+.demo-upload-status {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    font-family: var(--font-mono);
+}
+.demo-upload-status.loaded {
+    color: var(--accent, #5eead4);
+}
+.demo-upload-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+.demo-upload-btn {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.demo-clear {
+    font-size: 0.72rem;
+}
+
+.btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 0.4rem 0.8rem;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.btn-ghost:hover {
+    border-color: var(--accent, #5eead4);
+    color: var(--accent, #5eead4);
+    background: rgba(94, 234, 212, 0.05);
+}
+
+/* Participant profile panel inside individual view */
+.demographics-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 1rem 1.2rem;
+    margin: 0 0 1.2rem;
+    animation: fadeUp 0.5s ease both;
+}
+.demo-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.8rem;
+    margin-bottom: 0.8rem;
+    flex-wrap: wrap;
+}
+.demo-title {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+}
+.demo-icon {
+    color: var(--accent, #5eead4);
+    font-size: 0.7rem;
+}
+.demo-subject {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    font-weight: 500;
+}
+.demo-aborted {
+    color: #ef4444;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    margin-left: auto;
+}
+.demo-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 0.6rem 1rem;
+}
+.demo-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+.demo-field-label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+}
+.demo-field-value {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.demo-field-value.empty {
+    color: var(--text-dim);
+    opacity: 0.5;
+}
+
 @keyframes progressSlide {
     0% { transform: translateX(-100%); }
     100% { transform: translateX(350%); }

@@ -125,6 +125,10 @@ function initUpload() {
         if (files.length > 0) uploadFiles(files);
     });
 
+    // Demographics CSV
+    initDemographicsUpload();
+    refreshDemographicsStatus();
+
     async function uploadFiles(files) {
         errorEl.hidden = true;
         progress.hidden = false;
@@ -180,6 +184,129 @@ function initUpload() {
     }
 }
 
+// ── Demographics upload ──
+let demographicsLoaded = false;
+
+function initDemographicsUpload() {
+    const input = document.getElementById('demo-file-input');
+    const clearBtn = document.getElementById('demo-clear-btn');
+    if (!input) return;
+
+    input.addEventListener('change', async () => {
+        if (!input.files || !input.files.length) return;
+        const file = input.files[0];
+        const formData = new FormData();
+        formData.append('file', file);
+        setDemographicsStatus('Uploading…', false);
+        try {
+            const resp = await fetch(`${API}/api/demographics/upload`, { method: 'POST', body: formData });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({ detail: 'Upload failed' }));
+                setDemographicsStatus(`⚠ ${err.detail || 'Upload failed'}`, false);
+                return;
+            }
+            const data = await resp.json();
+            demographicsLoaded = true;
+            const label = data.csv_source || file.name;
+            const matched = data.matches.length;
+            const unmatched = data.unmatched.length;
+            let msg = `${data.n_participants} participants loaded from ${label}`;
+            if (matched + unmatched > 0) {
+                msg += ` · ${matched} matched, ${unmatched} unmatched`;
+            }
+            setDemographicsStatus(msg, true);
+            clearBtn.hidden = false;
+            document.getElementById('demo-upload-label').textContent = 'Replace CSV';
+            // Refresh whatever view is currently visible
+            if (currentData) refreshCurrentResultDemographics();
+        } catch (err) {
+            setDemographicsStatus(`⚠ ${err.message || 'Upload failed'}`, false);
+        } finally {
+            input.value = '';   // let the user upload the same file again
+        }
+    });
+
+    clearBtn.addEventListener('click', async () => {
+        try {
+            await fetch(`${API}/api/demographics`, { method: 'DELETE' });
+        } catch (_) { /* ignore */ }
+        demographicsLoaded = false;
+        setDemographicsStatus('No file loaded — analysis runs without demographics', false);
+        clearBtn.hidden = true;
+        document.getElementById('demo-upload-label').textContent = 'Upload CSV';
+        if (currentData) refreshCurrentResultDemographics();
+    });
+}
+
+function setDemographicsStatus(msg, loaded) {
+    const el = document.getElementById('demo-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle('loaded', !!loaded);
+}
+
+async function refreshDemographicsStatus() {
+    // Check backend state on load (in case demographics were left in memory)
+    try {
+        const resp = await fetch(`${API}/api/demographics`);
+        if (!resp.ok) return;
+        const d = await resp.json();
+        if (d.n_participants > 0 && d.csv_source) {
+            demographicsLoaded = true;
+            setDemographicsStatus(`${d.n_participants} participants loaded from ${d.csv_source}`, true);
+            document.getElementById('demo-clear-btn').hidden = false;
+            document.getElementById('demo-upload-label').textContent = 'Replace CSV';
+        }
+    } catch (_) { /* backend down, ignore */ }
+}
+
+// Re-fetch the current subject so its demographics section refreshes when
+// the CSV state changes on the fly.
+async function refreshCurrentResultDemographics() {
+    if (!currentResultId) return;
+    try {
+        // Cheapest way: hit /api/subjects and then /api/compare (single-subject compare
+        // is blocked, so use the raw endpoint). Easiest: re-render existing summary
+        // by re-uploading? no. Just render from the currentData for now — the demo
+        // payload is baked in at upload time. To *live* refresh, we'd need a
+        // dedicated endpoint. For now: prompt the user to re-upload if they change
+        // the CSV mid-session.
+        renderDemographicsPanel(currentData.summary.demographics);
+    } catch (_) { /* ignore */ }
+}
+
+function renderDemographicsPanel(demo) {
+    const panel = document.getElementById('demographics-panel');
+    if (!panel) return;
+    if (!demo || !demo.matched) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+
+    // Header
+    const subjEl = document.getElementById('demo-subject');
+    subjEl.textContent = `S${demo.session}P${String(demo.participant).padStart(3, '0')} · Participant ${demo.participant} · Session ${demo.session}`;
+    document.getElementById('demo-aborted').hidden = !demo.aborted;
+
+    // Fields
+    const grid = document.getElementById('demo-fields');
+    grid.innerHTML = demo.fields.map(f => {
+        const value = f.value || '—';
+        const empty = !f.value ? ' empty' : '';
+        return `<div class="demo-field">
+            <span class="demo-field-label">${escapeHtml(f.label)}</span>
+            <span class="demo-field-value${empty}" title="${escapeHtml(String(value))}">${escapeHtml(String(value))}</span>
+        </div>`;
+    }).join('');
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
 // ── Individual results ──
 function showResults(data) {
     currentResultId = data.result_id;
@@ -193,13 +320,21 @@ function showResults(data) {
     document.getElementById('info-filename').textContent = s.filename;
     document.getElementById('info-date').textContent = s.recording_date;
     document.getElementById('info-srate').textContent = `${s.sampling_rate} Hz`;
-    document.getElementById('info-blocks').textContent = s.n_blocks;
+    // Blocks — show refresh-rate labels if we know them
+    const bo = s.demographics && s.demographics.block_order || {};
+    const blockLabel = (bo['1'] || bo['2'])
+        ? `${s.n_blocks} · ${bo['1'] || '?'} / ${bo['2'] || '?'}`
+        : `${s.n_blocks}`;
+    document.getElementById('info-blocks').textContent = blockLabel;
     document.getElementById('info-trials').textContent =
         `${s.n_trials} · ${s.n_congruent} con / ${s.n_incongruent} inc`;
 
     // Channel names
     document.getElementById('ch1-name').textContent = s.theta.channel;
     document.getElementById('ch2-name').textContent = s.beta.channel;
+
+    // Demographics panel (only shown if matched)
+    renderDemographicsPanel(s.demographics);
 
     // Theta card
     setCard('theta', s.theta);

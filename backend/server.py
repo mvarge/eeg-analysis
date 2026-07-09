@@ -38,6 +38,10 @@ from pipeline import (
     HP_HZ, WIN_S, PAD_S, THETA_BAND, BETA_BAND, TOTAL_BAND,
     run_pipeline,
 )
+from demographics import (
+    Demographic, DISPLAY_FIELDS,
+    parse_demographics, match_demographics, parse_filename_ids,
+)
 
 
 app = FastAPI(title="EEG Flanker Analysis")
@@ -50,6 +54,8 @@ app.add_middleware(
 )
 
 _results: Dict[str, PipelineResult] = {}
+_demographics: List[Demographic] = []           # loaded from most recent CSV upload
+_demographics_source: str | None = None         # filename of the CSV upload, for UI
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -69,6 +75,41 @@ def _condition_label(cond: str) -> str:
     return "congruent" if cond == "con" else "incongruent"
 
 
+def _demographic_payload(filename: str) -> dict:
+    """
+    Build the demographics payload for a given filename.
+
+    Always returns a dict with `matched: bool`, `session/participant` parsed
+    from the filename (or None), and `fields`, a list of {key, label, value}
+    entries in display order. `block_order` maps 1/2 → e.g. '60 Hz'.
+    """
+    ids = parse_filename_ids(filename)
+    payload = {
+        "matched": False,
+        "session": ids[0] if ids else None,
+        "participant": ids[1] if ids else None,
+        "fields": [],
+        "block_order": {},
+        "aborted": False,
+        "csv_source": _demographics_source,
+    }
+    if not _demographics:
+        return payload
+    demo = match_demographics(filename, _demographics)
+    if demo is None:
+        return payload
+    payload["matched"] = True
+    payload["session"] = demo.session
+    payload["participant"] = demo.participant
+    payload["aborted"] = demo.aborted
+    payload["block_order"] = {str(k): v for k, v in demo.block_order.items()}
+    payload["fields"] = [
+        {"key": key, "label": label, "value": demo.display.get(key, "")}
+        for key, _col, label in DISPLAY_FIELDS
+    ]
+    return payload
+
+
 def _summary_payload(r: PipelineResult) -> dict:
     """Structured summary for the frontend."""
     return {
@@ -82,6 +123,7 @@ def _summary_payload(r: PipelineResult) -> dict:
         "n_incongruent": sum(1 for t in r.trials if t.cond == "first"),
         "theta": _channel_payload(r.theta_summary),
         "beta":  _channel_payload(r.beta_summary),
+        "demographics": _demographic_payload(r.filename),
         "config": {
             "hp_hz": HP_HZ,
             "window_s": WIN_S,
@@ -225,6 +267,77 @@ async def remove_subject(result_id: str):
     return {"status": "ok"}
 
 
+# ============================================================
+#  Demographics
+# ============================================================
+@app.post("/api/demographics/upload")
+async def upload_demographics(file: UploadFile = File(...)):
+    """
+    Upload the demographics CSV. Replaces any previously loaded demographics
+    in memory. Returns how many rows parsed + which uploaded LabChart files
+    now have a matching demographic record.
+    """
+    global _demographics, _demographics_source
+    raw = await file.read()
+    try:
+        demos = parse_demographics(raw)
+    except Exception as exc:
+        raise HTTPException(400, f"Could not parse demographics CSV: {exc}")
+
+    _demographics = demos
+    _demographics_source = file.filename or "demographics.csv"
+
+    # Report matching against currently uploaded EEG files
+    matches = []
+    unmatched = []
+    for rid, r in _results.items():
+        ids = parse_filename_ids(r.filename)
+        m = match_demographics(r.filename, demos) if ids else None
+        (matches if m else unmatched).append({"result_id": rid, "filename": r.filename})
+
+    return {
+        "status": "success",
+        "csv_source": _demographics_source,
+        "n_participants": len(demos),
+        "matches": matches,
+        "unmatched": unmatched,
+    }
+
+
+@app.get("/api/demographics")
+async def get_demographics():
+    """List all loaded demographic rows (compact summary)."""
+    return {
+        "csv_source": _demographics_source,
+        "n_participants": len(_demographics),
+        "participants": [
+            {
+                "session": d.session,
+                "participant": d.participant,
+                "filename_stem": f"S{d.session}P{d.participant:03d}",
+                "age": d.display.get("age"),
+                "sex": d.display.get("sex"),
+                "block_order": {str(k): v for k, v in d.block_order.items()},
+                "aborted": d.aborted,
+            }
+            for d in _demographics
+        ],
+        "fields": [
+            {"key": k, "label": lbl}
+            for k, _col, lbl in DISPLAY_FIELDS
+        ],
+    }
+
+
+@app.delete("/api/demographics")
+async def clear_demographics():
+    """Remove the currently loaded demographics."""
+    global _demographics, _demographics_source
+    _demographics = []
+    _demographics_source = None
+    return {"status": "ok"}
+
+
 @app.get("/api/compare")
 async def compare_subjects():
     """Aggregate payload for the group view."""
@@ -260,16 +373,41 @@ def _csv_response(rows: List[list], header: list, filename: str) -> StreamingRes
 
 
 TRIAL_CSV_HEADER = [
-    "recording", "trial", "block", "btrial", "cond", "onset", "key", "rt_ms",
+    "recording", "trial", "block", "btrial", "block_hz", "cond", "onset", "key", "rt_ms",
     "fz_ptp", "theta_fft", "beta_fft", "maxz", "impact", "coinc",
     "blink", "fz_exclude", "c3_exclude", "reason",
     "theta_abs", "theta_rel", "beta_abs", "beta_rel",
 ]
 
 
-def _trial_csv_row(rec: str, t: TrialResult) -> list:
-    return [
-        rec, t.trial, t.block, t.btrial, t.cond,
+def _demographic_columns():
+    """Return list of (header, key) tuples for demographic columns in CSV order."""
+    if not _demographics:
+        return []
+    return [(f"demo_{key}", key) for key, _col, _label in DISPLAY_FIELDS] + [("demo_matched", "__matched")]
+
+
+def _demographic_values(filename: str, key_list: list) -> list:
+    """Return CSV values for a filename's demographics matching key_list order."""
+    if not _demographics:
+        return []
+    demo = match_demographics(filename, _demographics)
+    out = []
+    for _hdr, key in key_list:
+        if key == "__matched":
+            out.append(bool(demo))
+        else:
+            out.append(demo.display.get(key, "") if demo else "")
+    return out
+
+
+def _trial_csv_row(rec: str, t: TrialResult, demo_cols=None) -> list:
+    if demo_cols is None:
+        demo_cols = _demographic_columns()
+    demo = match_demographics(rec, _demographics) if _demographics else None
+    block_hz = demo.block_order.get(t.block, "") if demo else ""
+    row = [
+        rec, t.trial, t.block, t.btrial, block_hz, t.cond,
         round(t.onset, 4), round(t.key, 4), t.rt_ms,
         round(t.fz_ptp, 4), round(t.theta_fft, 4), round(t.beta_fft, 4),
         round(t.maxz, 6), round(t.impact, 6), round(t.coinc, 6),
@@ -277,6 +415,8 @@ def _trial_csv_row(rec: str, t: TrialResult) -> list:
         round(t.theta_abs, 6), round(t.theta_rel, 6),
         round(t.beta_abs, 6),  round(t.beta_rel, 6),
     ]
+    row.extend(_demographic_values(rec, demo_cols))
+    return row
 
 
 @app.get("/api/download-csv-trials/{result_id}")
@@ -285,8 +425,10 @@ async def download_trials_csv(result_id: str):
     if result_id not in _results:
         raise HTTPException(404, "Result not found.")
     r = _results[result_id]
-    rows = [_trial_csv_row(r.filename, t) for t in r.trials]
-    return _csv_response(rows, TRIAL_CSV_HEADER, f"{result_id}_results.csv")
+    demo_cols = _demographic_columns()
+    header = TRIAL_CSV_HEADER + [h for h, _ in demo_cols]
+    rows = [_trial_csv_row(r.filename, t, demo_cols) for t in r.trials]
+    return _csv_response(rows, header, f"{result_id}_results.csv")
 
 
 @app.get("/api/download-csv-trials-all")
@@ -294,10 +436,12 @@ async def download_trials_csv_all():
     """Combined per-trial CSV across all uploaded subjects."""
     if not _results:
         raise HTTPException(404, "No results.")
+    demo_cols = _demographic_columns()
+    header = TRIAL_CSV_HEADER + [h for h, _ in demo_cols]
     rows = []
     for r in _results.values():
-        rows.extend(_trial_csv_row(r.filename, t) for t in r.trials)
-    return _csv_response(rows, TRIAL_CSV_HEADER, "eeg_group_results.csv")
+        rows.extend(_trial_csv_row(r.filename, t, demo_cols) for t in r.trials)
+    return _csv_response(rows, header, "eeg_group_results.csv")
 
 
 EXCL_HEADER = ["recording", "trial", "block", "btrial", "cond", "rt_ms",
@@ -328,12 +472,16 @@ SUMMARY_HEADER = [
     "beta_abs_median_con", "beta_abs_median_inc",
     "theta_exclusion_pct_con", "theta_exclusion_pct_inc", "theta_balance_flag",
     "beta_exclusion_pct_con",  "beta_exclusion_pct_inc",  "beta_balance_flag",
+    "block1_hz", "block2_hz",
 ]
 
 
-def _summary_row(r: PipelineResult) -> list:
+def _summary_row(r: PipelineResult, demo_cols=None) -> list:
+    if demo_cols is None:
+        demo_cols = _demographic_columns()
     ts, bs = r.theta_summary, r.beta_summary
-    return [
+    demo = match_demographics(r.filename, _demographics) if _demographics else None
+    row = [
         r.filename, r.recording_date,
         ts.surviving, ts.excluded,
         round(ts.rel_median_con, 6), round(ts.rel_median_inc, 6),
@@ -343,7 +491,11 @@ def _summary_row(r: PipelineResult) -> list:
         round(bs.abs_median_con, 6), round(bs.abs_median_inc, 6),
         round(ts.exclusion_pct_con, 2), round(ts.exclusion_pct_inc, 2), ts.balance_flag,
         round(bs.exclusion_pct_con, 2), round(bs.exclusion_pct_inc, 2), bs.balance_flag,
+        demo.block_order.get(1, "") if demo else "",
+        demo.block_order.get(2, "") if demo else "",
     ]
+    row.extend(_demographic_values(r.filename, demo_cols))
+    return row
 
 
 @app.get("/api/download-csv/{result_id}")
@@ -352,7 +504,9 @@ async def download_summary_csv(result_id: str):
     if result_id not in _results:
         raise HTTPException(404, "Result not found.")
     r = _results[result_id]
-    return _csv_response([_summary_row(r)], SUMMARY_HEADER, f"{result_id}_summary.csv")
+    demo_cols = _demographic_columns()
+    header = SUMMARY_HEADER + [h for h, _ in demo_cols]
+    return _csv_response([_summary_row(r, demo_cols)], header, f"{result_id}_summary.csv")
 
 
 @app.get("/api/download-csv-all")
@@ -360,8 +514,10 @@ async def download_summary_csv_all():
     """Group summary CSV (one row per subject)."""
     if not _results:
         raise HTTPException(404, "No results.")
-    rows = [_summary_row(r) for r in _results.values()]
-    return _csv_response(rows, SUMMARY_HEADER, "eeg_group_summary.csv")
+    demo_cols = _demographic_columns()
+    header = SUMMARY_HEADER + [h for h, _ in demo_cols]
+    rows = [_summary_row(r, demo_cols) for r in _results.values()]
+    return _csv_response(rows, header, "eeg_group_summary.csv")
 
 
 # ============================================================

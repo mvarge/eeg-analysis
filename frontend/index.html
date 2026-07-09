@@ -46,6 +46,25 @@
                 <span class="progress-text">Processing...</span>
             </div>
             <div id="upload-error" class="error-msg" hidden></div>
+
+            <!-- Demographics (optional) -->
+            <div class="demographics-upload">
+                <div class="demo-upload-header">
+                    <span class="demo-upload-title">Demographics CSV <span class="demo-upload-opt">(optional)</span></span>
+                    <span class="demo-upload-status" id="demo-status">No file loaded — analysis runs without demographics</span>
+                </div>
+                <div class="demo-upload-actions">
+                    <label for="demo-file-input" class="btn-ghost demo-upload-btn">
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                            <path d="M7 2v8M7 10L4 7M7 10l3-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                            <path d="M2 12h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                        </svg>
+                        <span id="demo-upload-label">Upload CSV</span>
+                    </label>
+                    <input type="file" id="demo-file-input" accept=".csv" hidden>
+                    <button type="button" id="demo-clear-btn" class="btn-ghost demo-clear" hidden>Clear</button>
+                </div>
+            </div>
         </section>
 
         <!-- Results Section -->
@@ -56,6 +75,19 @@
                 <div class="info-item"><span class="info-label">Rate</span><span class="info-value" id="info-srate">—</span></div>
                 <div class="info-item"><span class="info-label">Blocks</span><span class="info-value" id="info-blocks">—</span></div>
                 <div class="info-item"><span class="info-label">Trials</span><span class="info-value" id="info-trials">—</span></div>
+            </div>
+
+            <!-- Demographics panel (only shown when matched via CSV) -->
+            <div class="demographics-panel" id="demographics-panel" hidden>
+                <div class="demo-header">
+                    <span class="demo-title">
+                        <span class="demo-icon">◉</span>
+                        Participant profile
+                    </span>
+                    <span class="demo-subject" id="demo-subject">—</span>
+                    <span class="demo-aborted" id="demo-aborted" hidden>⚠ Session marked aborted</span>
+                </div>
+                <div class="demo-fields" id="demo-fields"></div>
             </div>
 
             <!-- Power Summary Cards -->
