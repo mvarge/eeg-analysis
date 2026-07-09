@@ -1,6 +1,6 @@
-# 🧠 EEG Flanker Analysis Tool
+# EEG Flanker Analysis Tool
 
-A web-based tool that processes EEG recordings from an **Eriksen Flanker Task** experiment. Upload your LabChart `.txt` export files and the tool automatically parses the data, extracts **theta** and **beta** brain wave power for congruent vs incongruent trials across both experimental blocks, displays interactive charts, and exports SPSS-ready CSV files.
+A web-based tool that processes EEG recordings from an **Eriksen Flanker Task** experiment. Upload your LabChart `.txt` export files and the tool automatically parses the data, computes **theta** and **beta** spectral power for congruent vs incongruent trials (with a strict artifact-rejection pipeline), displays interactive charts, and exports SPSS-ready CSV files.
 
 Everything runs locally on your computer — your data never leaves your machine.
 
@@ -10,129 +10,133 @@ Everything runs locally on your computer — your data never leaves your machine
 
 ---
 
-## 📖 What the Tool Does
+## What the Tool Does
 
-This tool implements the full EEG analysis pipeline described in the developer brief:
+This tool implements a 10-stage pipeline built around **complex Morlet wavelet** spectral power in the reaction-time window of each trial:
 
-1. **Reads LabChart 8 text exports** — parses the file header (sampling rate, channel names, recording date) and the two channels of EEG data, plus all embedded comment markers
-2. **Identifies trial events** — finds `con` (congruent) and `inc`/`first` (incongruent) markers, determines which block (1 or 2) each trial belongs to, and handles the known marker mislabelling where `first` actually means incongruent
-3. **Filters the signal** — applies a 1–40 Hz bandpass filter to both channels using MNE-Python
-4. **Extracts epochs** — cuts the continuous EEG into 1.2-second windows around each stimulus onset (-200ms to +1000ms), one epoch per trial (160 trials total: 80 per block)
-5. **Applies baseline correction** — subtracts the mean signal from the 200ms before each stimulus to remove drift
-6. **Computes frequency power** — runs FFT on each epoch and extracts:
-   - **Theta power (4–8 Hz)** from Channel 1 (Fz–Pz)
-   - **Beta power (13–30 Hz)** from Channel 2 (Cz–P4)
-7. **Averages by condition** — computes mean power for congruent vs incongruent trials
-8. **Exports CSV files** ready for direct import into SPSS
+1. **Parse LabChart 8 text exports** — reads Latin-1 encoded, tab-delimited files at 400 Hz with two channels: **Fz-Pz** and **C3-C4**. Extracts all embedded comment markers.
+2. **Pair markers into trials** — walks through `con` (congruent) and `first` (incongruent) markers, pairs each with the next `key` (button press). Detects the >30 s inter-block pause and assigns block 1 vs block 2 automatically.
+3. **1 Hz high-pass filter** — removes slow drift via MNE-Python.
+4. **Epoch each trial** — 0 to +500 ms post-stimulus window with a ±300 ms pad, giving a 1.1 s segment for wavelet analysis without edge artifacts.
+5. **Per-trial quality metrics** on each epoch:
+   - Peak-to-peak amplitude (blink probe on Fz-Pz)
+   - Theta-band FFT power (Fz-Pz)
+   - Beta-band FFT power (C3-C4) — gross EMG probe
+   - Max |z-score| across the epoch
+   - Sample-level burst impact score
+   - Between-channel coincidence z-score
+6. **Automatic artifact rejection** per channel (independent trial sets for Fz-Pz and C3-C4):
+   - Blink (`fz_ptp` > 80 µV)
+   - Gross EMG (`beta_fft` > 150 000)
+   - Amplitude burst (`maxz` ≥ 3.6 AND `impact` ≥ 15)
+   - Between-channel coincidence (`coinc` ≥ 3.0)
+7. **Complex Morlet wavelet spectral power** — 1–40 Hz in 0.5 Hz steps. Theta uses 3-cycle wavelets (4–8 Hz), beta uses 7-cycle wavelets (13–30 Hz). Reports both **absolute** power and **relative** power (band ÷ 1–40 Hz total, expressed as a fraction).
+8. **Per-condition medians** on the surviving trials — separately for congruent and incongruent.
+9. **Balance check** — flags a channel if per-condition exclusion rates differ by more than 10 %-points.
+10. **Export SPSS-ready CSVs** with per-trial rows, per-subject summary rows, and combined multi-subject files.
+
+The primary metric is **relative power** (fraction of total 1–40 Hz power falling in each band), which is more robust to individual differences in overall amplitude than absolute power.
 
 ---
 
-## 🖥 The Three Screens
+## The Three Screens
 
 ### Screen 1 — Upload
 
-The landing page. You see a drop zone where you can drag and drop one or more LabChart `.txt` export files (or click to browse). A progress indicator shows while each file is being processed.
+The landing page. A drop zone accepts one or more LabChart `.txt` files (or click to browse). Each file is processed as it lands.
 
-- **Drop one file** → goes to the individual analysis screen
-- **Drop multiple files at once** → goes straight to the group comparison screen
-- You can also upload one file at a time and build up a group incrementally
+- **One file** → jumps to the individual analysis screen
+- **Multiple files** → jumps to the group comparison screen
+- You can also add subjects one at a time
 
 ### Screen 2 — Individual Analysis
 
-Shows the full analysis results for a single participant. This screen contains:
+Shows the full analysis for a single participant.
 
-**Info bar** at the top showing:
-- Filename (subject ID)
-- Recording date (extracted from the LabChart file)
-- Sampling rate
-- Total epoch count (e.g. "160 — 80 con / 80 inc")
+**Info bar:** filename, recording date, sampling rate, block count, trial count broken down by condition.
 
-**Two power summary cards:**
-- **θ Theta Power** — shows mean theta power (4–8 Hz) from Channel 1 (Fz–Pz) for congruent vs incongruent trials, with a visual comparison bar
-- **β Beta Power** — shows mean beta power (13–30 Hz) from Channel 2 (Cz–P4) for congruent vs incongruent trials, with a visual comparison bar
+**Two power cards** — one for theta (Fz-Pz), one for beta (C3-C4):
 
-**Five interactive charts** (hover for values, zoom, pan):
-- **Averaged ERP — Ch1** — the averaged event-related potential waveform for Channel 1, with separate lines for congruent (teal) and incongruent (pink) conditions. Time axis is -200ms to +1000ms relative to stimulus onset
-- **Averaged ERP — Ch2** — same for Channel 2
-- **Power Spectrum — Ch1** — frequency power distribution for Channel 1 with the theta band (4–8 Hz) highlighted as a shaded region
-- **Power Spectrum — Ch2** — frequency power distribution for Channel 2 with the beta band (13–30 Hz) highlighted
-- **Single-Trial Power Distribution** — violin plots showing the spread of theta and beta power values across all individual trials. This helps you see whether the mean values are representative or if there are outliers skewing the average
+- **Relative power** (primary metric): median for con vs inc, as a fraction of total 1–40 Hz power
+- **Absolute power** (secondary): median for con vs inc, in µV²
+- **Surviving trials** after artifact rejection, broken down by condition
+- **Balance flag** — warns if the exclusion rate between conditions differs by more than 10 %
+
+**Charts:**
+
+- **Wavelet Spectrum — Fz-Pz** — mean 1–40 Hz power spectrum (log scale) for surviving trials, con vs inc lines, theta band shaded
+- **Wavelet Spectrum — C3-C4** — same, with beta band shaded
+- **Per-Trial Scatter** — every trial's relative theta and relative beta power, colored by condition, so you can see the spread behind the medians
+
+**Exclusion breakdown** — a table showing how many trials each rejection rule removed per channel and condition, and a list of every excluded trial with the specific rules that fired.
 
 **Action buttons:**
-- **Summary CSV** — downloads a one-row summary with averaged power values for this subject
-- **Trial-Level CSV** — downloads a detailed CSV with one row per trial (160 rows), including block number, condition, and individual theta/beta power values
-- **Add Another Subject** — returns to the upload screen to add more files
-- **Compare Subjects** — once 2+ subjects are uploaded, switches to the group comparison view
-- **Start Over** — clears all uploaded data and returns to the upload screen
 
-**Subject list** — when multiple subjects have been uploaded, a list appears showing all subjects with colour-coded chips. You can remove individual subjects by clicking the × on their chip.
+- **Trial CSV** — one row per trial with all 6 quality metrics, exclusion flags, and absolute/relative power
+- **Exclusions CSV** — one row per excluded trial with the reason
+- **Summary CSV** — one row for this subject with all medians and survival counts
+- **Add Another Subject** / **Compare Subjects** / **Start Over**
 
 ### Screen 3 — Group Comparison
 
-Shows all uploaded subjects side by side. This screen contains:
+Shows all uploaded subjects side by side.
 
-**Summary table** with one row per subject showing:
-- Subject name, recording date
-- Theta power (congruent and incongruent)
-- Beta power (congruent and incongruent)
-- Total epoch count
+**Summary table** — one row per subject: recording date, theta/beta relative medians (con and inc), survival counts, balance flags.
 
-**Four comparison charts:**
-- **θ Theta Power by Subject** — grouped bar chart comparing congruent vs incongruent theta power across all subjects
-- **β Beta Power by Subject** — same for beta power
-- **Overlaid ERPs — Ch1 (Congruent)** — all subjects' averaged congruent ERP waveforms overlaid on the same axes, each in a different colour
-- **Overlaid ERPs — Ch1 (Incongruent)** — same for incongruent condition
+**Comparison charts:**
+
+- **Theta Relative Power by Subject** — grouped bars, con vs inc per subject
+- **Beta Relative Power by Subject** — same for beta
+- **Exclusion Rate by Subject** — theta and beta exclusion percentages, so you can spot noisy recordings
+- **Congruency Effect by Subject** — bar chart of (inc − con) theta relative power, the Flanker effect
 
 **Action buttons:**
-- **Group Summary CSV** — downloads a CSV with one row per subject (the format specified in the developer brief), with a `subject` column for easy SPSS sorting
-- **Group Trial-Level CSV** — downloads a single CSV containing every trial from every subject (e.g. 5 subjects × 160 trials = 800 rows), with columns for subject, block, condition, and power values. This is the most useful format for SPSS repeated-measures analysis
-- **Add More Subjects** — returns to upload to add more files to the group
-- **← Back to Individual** — returns to the individual view for the last-viewed subject
+
+- **Group Summary CSV** — one row per subject
+- **Group Trial CSV** — every trial from every subject in one flat file (ideal for SPSS repeated-measures)
+- **Add More Subjects** / **← Back to Individual**
 
 ### Navigation
 
-Click the **header/logo** at any time to return to the upload screen.
+Click the header/logo to return to the upload screen.
 
 ---
 
-## 🚀 How to Install & Run
+## How to Install & Run
 
 ### What You Need First
 
 - **Python 3.10 or newer**
   - **Mac / Linux:** open Terminal and type `python3 --version`
   - **Windows:** open Command Prompt (or PowerShell) and type `python --version`
-  - If you don't have it: go to [python.org/downloads](https://www.python.org/downloads/) and install the latest version. **On Windows, tick "Add Python to PATH" during installation.**
-- **A web browser** (Chrome, Firefox, Safari, Edge — anything works)
+  - If missing: install the latest from [python.org/downloads](https://www.python.org/downloads/). **On Windows, tick "Add Python to PATH" during installation.**
+- **A web browser** (any modern one).
 
 ### Step-by-Step
 
-**1. Download this project**
+**1. Download**
 
-Click the green **Code** button on GitHub → **Download ZIP** → unzip it somewhere easy to find (like your Desktop).
+Green **Code** button on GitHub → **Download ZIP** → unzip somewhere convenient.
 
-Or if you're comfortable with a terminal:
+Or via terminal:
 ```bash
 git clone https://github.com/mvarge/eeg-analysis.git
 cd eeg-analysis
 ```
 
-**2. Run it**
+**2. Run**
 
-#### On macOS / Linux
+#### macOS / Linux
 
-Open **Terminal** (on Mac: press `Cmd + Space`, type "Terminal", hit Enter).
-
-Then type these commands:
 ```bash
 cd ~/Desktop/eeg-analysis    # or wherever you unzipped it
-chmod +x run.sh               # make the run script executable (first time only)
-./run.sh                       # start the app
+chmod +x run.sh               # first time only
+./run.sh
 ```
 
-#### On Windows
+#### Windows
 
-Open **File Explorer**, navigate to the unzipped `eeg-analysis` folder, and **double-click `run.bat`**.
+Double-click `run.bat` in File Explorer.
 
 Or from Command Prompt / PowerShell:
 ```cmd
@@ -140,65 +144,49 @@ cd %USERPROFILE%\Desktop\eeg-analysis
 run.bat
 ```
 
-PowerShell users can alternatively run:
+PowerShell alternative:
 ```powershell
 .\run.ps1
 ```
-(If PowerShell blocks the script the first time, run once:
-`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`)
+(If PowerShell blocks the script, run once: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`.)
+
+The first run creates a Python virtual environment and installs dependencies (MNE, SciPy, PyWavelets, FastAPI…) — about 30 seconds.
+
+**3. Open**
+
+[http://localhost:8000](http://localhost:8000)
+
+**4. Upload**
+
+Drag `.txt` files onto the drop zone. One → individual view; several → group view.
+
+**5. Download**
+
+Every screen exposes CSV export buttons.
+
+**6. Stop**
+
+Ctrl + C in the terminal window where the server is running.
 
 ---
 
-The first time you run it, the script will automatically create a Python virtual environment and install all required packages (MNE, SciPy, FastAPI, etc.) — takes about 30 seconds. You'll see:
-```
-  ╔══════════════════════════════════════╗
-  ║     EEG Flanker Analysis Tool        ║
-  ╚══════════════════════════════════════╝
+## Your Data Files
 
-→ Installing dependencies (first run only)...
-  ✓ Dependencies installed
-
-→ Starting server...
-  Open http://localhost:8000 in your browser
-  Press Ctrl+C to stop
-```
-
-**3. Open in your browser**
-
-Go to: **[http://localhost:8000](http://localhost:8000)**
-
-**4. Upload your data**
-
-- Drag and drop your `.txt` LabChart export file(s) onto the upload area
-- **One file** → shows individual analysis with charts
-- **Multiple files** → goes straight to group comparison view
-
-**5. Download results**
-
-Two CSV export options are available (both for individual and group views):
-- **Summary CSV** — one row per subject with averaged power values
-- **Trial-Level CSV** — one row per trial, including block number and condition (ideal for SPSS repeated-measures analysis)
-
-**6. To stop the app**
-
-Go back to the terminal window (Terminal on Mac/Linux, or the Command Prompt/PowerShell window that opened on Windows) and press **Ctrl + C**.
-
----
-
-## 📁 Your Data Files
-
-The tool accepts **LabChart 8 text exports** (`.txt` files). These should be exported from LabChart via File → Export → Text, with the Comments checkbox checked so that trial markers are included.
+The tool accepts **LabChart 8 text exports** (`.txt`). Export from LabChart via **File → Export → Text**, keeping the **Comments** checkbox ticked so trial markers are included.
 
 Each file should contain:
-- A header with metadata (sampling rate, channel names, recording date)
-- Two channels of EEG data (Channel 1: Fz–Pz, Channel 2: Cz–P4)
-- Comment markers: `con` (congruent), `inc`/`first` (incongruent), `second` (block boundary)
 
-**Your data stays private** — everything runs on your computer. Nothing is uploaded to the internet.
+- A header with `Interval=`, `ExcelDateTime=`, `ChannelTitle=`, `Range=`
+- Two data columns: **Fz-Pz** and **C3-C4** at 400 Hz
+- Comment markers (`#1 con`, `#1 first`, `#1 key`, occasional `#1 second` for block boundaries)
+
+Blocks are detected automatically from the >30 s pause between them.
+
+**Your data stays private** — everything runs on your computer.
 
 ### Test Data
 
-Want to try it without real data? Generate fake test files:
+Generate fake subject files without touching real data:
 
 **macOS / Linux:**
 ```bash
@@ -210,68 +198,91 @@ Want to try it without real data? Generate fake test files:
 .venv\Scripts\python scripts\generate_fake_data.py
 ```
 
-This creates fake subject files in `data/` that you can upload to test the tool.
+This drops three files (`S1P003.txt`–`S1P005.txt`) into `data/`.
 
 ---
 
-## 📊 What's in the Output CSVs
+## What's in the Output CSVs
+
+### Trial-level CSV (one row per trial)
+
+| Column | Meaning |
+|--------|---------|
+| `recording` | Subject identifier |
+| `trial` | 1-based trial number |
+| `block`, `btrial` | Block number and within-block trial number |
+| `cond` | `con` or `first` (incongruent) |
+| `onset`, `key`, `rt_ms` | Stimulus onset time, key-press time, reaction time |
+| `fz_ptp` | Fz-Pz peak-to-peak (µV) |
+| `theta_fft` | Fz-Pz theta FFT power (band-limited) |
+| `beta_fft` | C3-C4 beta FFT power (gross EMG probe) |
+| `maxz` | Max absolute z-score across the epoch |
+| `impact` | Burst impact score |
+| `coinc` | Between-channel coincidence z-score |
+| `blink`, `fz_exclude`, `c3_exclude` | Boolean rejection flags |
+| `reason` | Human-readable exclusion reasons |
+| `theta_abs`, `theta_rel` | Absolute and relative theta wavelet power (Fz-Pz) |
+| `beta_abs`, `beta_rel` | Absolute and relative beta wavelet power (C3-C4) |
 
 ### Summary CSV (one row per subject)
 
-| Column | What it means |
-|--------|--------------|
-| `subject` | Subject identifier (from filename) |
-| `recording_date` | When the EEG was recorded |
-| `theta_power_congruent` | Average theta power (4–8 Hz) for congruent trials |
-| `theta_power_incongruent` | Average theta power (4–8 Hz) for incongruent trials |
-| `beta_power_congruent` | Average beta power (13–30 Hz) for congruent trials |
-| `beta_power_incongruent` | Average beta power (13–30 Hz) for incongruent trials |
-| `n_epochs_congruent` | Number of congruent trials used |
-| `n_epochs_incongruent` | Number of incongruent trials used |
+| Column | Meaning |
+|--------|---------|
+| `recording`, `recording_date` | Subject and timestamp |
+| `theta_surviving`, `theta_excluded` | Trial counts on Fz-Pz |
+| `theta_rel_median_con`, `theta_rel_median_inc` | Relative theta medians |
+| `theta_abs_median_con`, `theta_abs_median_inc` | Absolute theta medians |
+| `beta_surviving`, `beta_excluded` | Trial counts on C3-C4 |
+| `beta_rel_median_con`, `beta_rel_median_inc` | Relative beta medians |
+| `beta_abs_median_con`, `beta_abs_median_inc` | Absolute beta medians |
+| `theta_exclusion_pct_con`, `theta_exclusion_pct_inc` | % excluded per condition (Fz-Pz) |
+| `beta_exclusion_pct_con`, `beta_exclusion_pct_inc` | % excluded per condition (C3-C4) |
+| `theta_balance_flag`, `beta_balance_flag` | `True` if con-vs-inc exclusion rates differ by more than 10 %-pts |
 
-### Trial-Level CSV (one row per trial — best for SPSS)
+### Exclusions CSV (one row per rejected trial)
 
-| Column | What it means |
-|--------|--------------|
-| `subject` | Subject identifier (from filename) |
-| `recording_date` | When the EEG was recorded |
-| `trial` | Trial number (1–160) |
-| `block` | Block number (1 or 2 — 80 trials each) |
-| `condition` | `congruent` or `incongruent` |
-| `theta_power` | Theta power (4–8 Hz) for this trial |
-| `beta_power` | Beta power (13–30 Hz) for this trial |
+| Column | Meaning |
+|--------|---------|
+| `recording`, `trial`, `block`, `cond` | Trial identity |
+| `channel` | `Fz-Pz` or `C3-C4` |
+| `reason` | Which rejection rules fired (`blink`, `gross EMG`, `burst`, `coincidence`) |
 
-> 💡 The trial-level CSV is ideal for SPSS — it's a single flat table you can sort/filter by subject, block, and condition. Use this for repeated-measures ANOVA or mixed-effects models.
+> The trial-level CSV is best for SPSS — a single flat table you can sort/filter by subject, block, and condition. The exclusion flags let you replicate or override the automatic rejection.
 
 ---
 
-## 🛠 Troubleshooting
+## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | `python3: command not found` (Mac/Linux) | Install Python from [python.org/downloads](https://www.python.org/downloads/) |
 | `'python' is not recognized...` (Windows) | Reinstall Python and tick **Add Python to PATH**, or install from the Microsoft Store |
 | `permission denied: ./run.sh` (Mac/Linux) | Run `chmod +x run.sh` first |
-| `run.ps1 cannot be loaded because running scripts is disabled` (Windows) | Run once: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` — or just use `run.bat` instead |
+| `run.ps1 cannot be loaded because running scripts is disabled` (Windows) | Run once: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` — or just use `run.bat` |
 | `no matching distribution for scipy` | Delete the `.venv` folder and run the script again |
-| Page won't load | Make sure the terminal window is still running and shows the server message |
-| Upload error | Make sure you're uploading a `.txt` file exported from LabChart |
+| Page won't load | Make sure the terminal window is still running |
+| Upload error | Confirm the file is a LabChart `.txt` export with the Comments box ticked |
+| All my trials get excluded | Check the exclusion breakdown — a very noisy recording, incorrect gain, or wrong channel montage can trip the automatic rules |
 
 ---
 
-## 📝 Technical Details
+## Technical Details
 
-For the curious — the processing pipeline:
-
-- **Parser**: Reads LabChart 8 text exports (Latin-1 encoding, tab-delimited)
-- **Marker handling**: Corrects known mislabelling (`first` → incongruent), tracks block boundaries (block 1 vs block 2)
-- **Filtering**: 1–40 Hz bandpass via MNE-Python
-- **Epoching**: -200ms to +1000ms around stimulus onset (160 epochs per participant)
-- **Baseline correction**: Subtracts mean of -200ms to 0ms window
-- **Power analysis**: FFT via SciPy, extracts theta (4–8 Hz) from Fz-Pz and beta (13–30 Hz) from Cz-P4
-- **Frontend**: Plotly.js interactive charts, vanilla HTML/CSS/JS
-- **Backend**: Python FastAPI server (runs locally)
-- **Privacy**: All processing happens on your machine — nothing is sent to the internet
+- **Parser**: LabChart 8 text (Latin-1, tab-delimited), 400 Hz, channels Fz-Pz and C3-C4. Block boundaries detected from >30 s marker gap.
+- **Trial pairing**: each `con`/`first` marker paired with the next `key` marker.
+- **Filtering**: 1 Hz high-pass via MNE-Python (IIR).
+- **Epoching**: 0 to +500 ms post-stimulus with ±300 ms padding for wavelet edge control.
+- **Quality metrics** (per epoch): peak-to-peak, band-limited FFT (theta on Fz-Pz, beta on C3-C4), max |z|, burst impact, between-channel coincidence.
+- **Rejection thresholds** (frozen from the reference implementation):
+  - Blink: `fz_ptp` > 80 µV
+  - Gross EMG: `beta_fft` > 150 000
+  - Burst: `maxz` ≥ 3.6 **and** `impact` ≥ 15
+  - Coincidence: `coinc` ≥ 3.0
+- **Spectral power**: complex Morlet wavelets via PyWavelets, 1–40 Hz in 0.5 Hz steps, 3 cycles for theta, 7 cycles for beta. Averaged over surviving trials per condition.
+- **Balance flag**: `|excl_pct_con − excl_pct_inc| > 10`.
+- **Frontend**: Plotly.js, vanilla HTML/CSS/JS.
+- **Backend**: Python FastAPI, in-memory results (no database).
+- **Privacy**: everything local.
 
 ---
 

@@ -10,7 +10,6 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Animated EEG wave background -->
     <canvas id="bg-wave" aria-hidden="true"></canvas>
 
     <header>
@@ -23,7 +22,7 @@
             </div>
             <div class="header-text">
                 <h1>EEG Flanker Analysis</h1>
-                <p class="subtitle">Eriksen Flanker Task · Theta & Beta Power Extraction</p>
+                <p class="subtitle">Wavelet spectral power · θ @ Fz-Pz · β @ C3-C4</p>
             </div>
         </a>
     </header>
@@ -51,68 +50,69 @@
 
         <!-- Results Section -->
         <section id="results-section" class="section" hidden>
-            <!-- File info bar -->
             <div class="info-bar">
-                <div class="info-item">
-                    <span class="info-label">File</span>
-                    <span class="info-value" id="info-filename">—</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">Date</span>
-                    <span class="info-value" id="info-date">—</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">Rate</span>
-                    <span class="info-value" id="info-srate">—</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">Epochs</span>
-                    <span class="info-value" id="info-epochs">—</span>
-                </div>
+                <div class="info-item"><span class="info-label">File</span><span class="info-value" id="info-filename">—</span></div>
+                <div class="info-item"><span class="info-label">Date</span><span class="info-value" id="info-date">—</span></div>
+                <div class="info-item"><span class="info-label">Rate</span><span class="info-value" id="info-srate">—</span></div>
+                <div class="info-item"><span class="info-label">Blocks</span><span class="info-value" id="info-blocks">—</span></div>
+                <div class="info-item"><span class="info-label">Trials</span><span class="info-value" id="info-trials">—</span></div>
             </div>
 
             <!-- Power Summary Cards -->
             <div class="power-cards">
                 <div class="power-card theta">
                     <div class="card-header">
-                        <span class="band-label">θ Theta Power</span>
+                        <span class="band-label">θ Theta · relative power</span>
                         <span class="channel-label" id="ch1-name">Fz-Pz</span>
                     </div>
                     <div class="card-values">
                         <div class="val-group congruent">
                             <span class="val-label">Congruent</span>
-                            <span class="val-number" id="theta-con">—</span>
+                            <span class="val-number" id="theta-rel-con">—</span>
+                            <span class="val-secondary" id="theta-abs-con">abs —</span>
                         </div>
                         <div class="val-divider"></div>
                         <div class="val-group incongruent">
                             <span class="val-label">Incongruent</span>
-                            <span class="val-number" id="theta-inc">—</span>
+                            <span class="val-number" id="theta-rel-inc">—</span>
+                            <span class="val-secondary" id="theta-abs-inc">abs —</span>
                         </div>
                     </div>
                     <div class="card-bar">
                         <div class="bar-con" id="theta-bar-con"></div>
                         <div class="bar-inc" id="theta-bar-inc"></div>
                     </div>
+                    <div class="card-footer">
+                        <span id="theta-survival">— surviving</span>
+                        <span class="card-flag" id="theta-balance" hidden>⚠ imbalanced rejection</span>
+                    </div>
                 </div>
+
                 <div class="power-card beta">
                     <div class="card-header">
-                        <span class="band-label">β Beta Power</span>
+                        <span class="band-label">β Beta · relative power</span>
                         <span class="channel-label" id="ch2-name">C3-C4</span>
                     </div>
                     <div class="card-values">
                         <div class="val-group congruent">
                             <span class="val-label">Congruent</span>
-                            <span class="val-number" id="beta-con">—</span>
+                            <span class="val-number" id="beta-rel-con">—</span>
+                            <span class="val-secondary" id="beta-abs-con">abs —</span>
                         </div>
                         <div class="val-divider"></div>
                         <div class="val-group incongruent">
                             <span class="val-label">Incongruent</span>
-                            <span class="val-number" id="beta-inc">—</span>
+                            <span class="val-number" id="beta-rel-inc">—</span>
+                            <span class="val-secondary" id="beta-abs-inc">abs —</span>
                         </div>
                     </div>
                     <div class="card-bar">
                         <div class="bar-con" id="beta-bar-con"></div>
                         <div class="bar-inc" id="beta-bar-inc"></div>
+                    </div>
+                    <div class="card-footer">
+                        <span id="beta-survival">— surviving</span>
+                        <span class="card-flag" id="beta-balance" hidden>⚠ imbalanced rejection</span>
                     </div>
                 </div>
             </div>
@@ -120,24 +120,41 @@
             <!-- Charts -->
             <div class="charts-grid">
                 <div class="chart-panel">
-                    <h3>Averaged ERP — <span id="chart1-ch">Ch1</span></h3>
-                    <div id="chart-erp-ch1" class="chart-container"></div>
+                    <h3>Wavelet Spectrum — Fz-Pz (theta band shaded)</h3>
+                    <div id="chart-spec-theta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>Averaged ERP — <span id="chart2-ch">Ch2</span></h3>
-                    <div id="chart-erp-ch2" class="chart-container"></div>
+                    <h3>Wavelet Spectrum — C3-C4 (beta band shaded)</h3>
+                    <div id="chart-spec-beta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>Power Spectrum — <span id="chart3-ch">Ch1</span></h3>
-                    <div id="chart-spec-ch1" class="chart-container"></div>
+                    <h3>Per-Trial Relative Power — Theta (Fz-Pz)</h3>
+                    <div id="chart-trials-theta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>Power Spectrum — <span id="chart4-ch">Ch2</span></h3>
-                    <div id="chart-spec-ch2" class="chart-container"></div>
+                    <h3>Per-Trial Relative Power — Beta (C3-C4)</h3>
+                    <div id="chart-trials-beta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel full-width">
-                    <h3>Single-Trial Power Distribution</h3>
-                    <div id="chart-distribution" class="chart-container"></div>
+                    <h3>Exclusion Breakdown</h3>
+                    <div id="chart-exclusion" class="chart-container"></div>
+                </div>
+            </div>
+
+            <!-- Excluded trials table -->
+            <div class="excluded-section" id="excluded-section" hidden>
+                <h3>Excluded Trials <span id="excluded-count" class="muted"></span></h3>
+                <div class="excluded-table-wrap">
+                    <table id="excluded-table" class="excluded-table">
+                        <thead>
+                            <tr>
+                                <th>#</th><th>Block</th><th>Condition</th><th>RT</th>
+                                <th>Fz p-t-p</th><th>maxz</th><th>impact</th><th>coinc</th>
+                                <th>Fz-Pz</th><th>C3-C4</th><th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
                 </div>
             </div>
 
@@ -157,6 +174,13 @@
                     </svg>
                     Trial-Level CSV
                 </button>
+                <button id="btn-download-exclusions" class="btn-primary">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <path d="M9 3v9M9 12L5 8M9 12l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    Exclusions CSV
+                </button>
                 <button id="btn-add-subject" class="btn-primary">
                     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                         <path d="M9 4v10M4 9h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -167,7 +191,6 @@
                 <button id="btn-new" class="btn-secondary">Start Over</button>
             </div>
 
-            <!-- Subject list -->
             <div id="subject-list" class="subject-list" hidden>
                 <h3>Uploaded Subjects</h3>
                 <div id="subject-items"></div>
@@ -181,7 +204,6 @@
                 <button id="btn-back-individual" class="btn-secondary btn-sm">← Back to Individual</button>
             </div>
 
-            <!-- Subject summary table -->
             <div class="compare-table-wrap">
                 <table id="compare-table" class="compare-table">
                     <thead></thead>
@@ -189,23 +211,22 @@
                 </table>
             </div>
 
-            <!-- Comparison charts -->
             <div class="charts-grid">
                 <div class="chart-panel">
-                    <h3>θ Theta Power by Subject</h3>
+                    <h3>θ Relative Power by Subject (Fz-Pz)</h3>
                     <div id="chart-compare-theta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>β Beta Power by Subject</h3>
+                    <h3>β Relative Power by Subject (C3-C4)</h3>
                     <div id="chart-compare-beta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>Overlaid ERPs — Ch1 (Congruent)</h3>
-                    <div id="chart-compare-erp-ch1-con" class="chart-container"></div>
+                    <h3>Exclusion Rate by Subject</h3>
+                    <div id="chart-compare-exclusion" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>Overlaid ERPs — Ch1 (Incongruent)</h3>
-                    <div id="chart-compare-erp-ch1-inc" class="chart-container"></div>
+                    <h3>Congruency Effect — Theta (Incongruent − Congruent)</h3>
+                    <div id="chart-compare-effect" class="chart-container"></div>
                 </div>
             </div>
 

@@ -385,6 +385,14 @@ main {
     letter-spacing: -0.02em;
 }
 
+.val-secondary {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin-top: 0.15rem;
+    letter-spacing: 0.02em;
+}
+
 .val-divider {
     width: 1px;
     height: 40px;
@@ -408,6 +416,90 @@ main {
 
 .bar-con { background: var(--congruent); }
 .bar-inc { background: var(--incongruent); }
+
+.card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    letter-spacing: 0.02em;
+}
+
+.card-flag {
+    color: #fbbf24;
+    font-weight: 500;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    background: rgba(251, 191, 36, 0.08);
+    border: 1px solid rgba(251, 191, 36, 0.2);
+}
+
+/* Excluded trials section */
+.excluded-section {
+    margin: 2rem 0 1.5rem;
+    padding: 1.25rem;
+    background: rgba(30, 35, 48, 0.4);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.excluded-section h3 {
+    margin: 0 0 1rem;
+    font-family: var(--font-serif);
+    font-size: 1.05rem;
+    color: var(--text);
+    font-weight: 500;
+}
+
+.excluded-section .muted {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    font-weight: 400;
+    margin-left: 0.5rem;
+}
+
+.excluded-table-wrap {
+    max-height: 320px;
+    overflow-y: auto;
+    border-radius: 4px;
+}
+
+.excluded-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+}
+
+.excluded-table th {
+    text-align: left;
+    padding: 0.5rem 0.6rem;
+    color: var(--text-dim);
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.2);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.excluded-table td {
+    padding: 0.4rem 0.6rem;
+    color: var(--text);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.excluded-table td.flag-yes {
+    color: #ef4444;
+    font-weight: 500;
+}
+
+.excluded-table td.flag-no {
+    color: var(--text-dim);
+}
 
 /* Charts grid */
 .charts-grid {

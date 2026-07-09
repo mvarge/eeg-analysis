@@ -1,12 +1,13 @@
 /* ============================================
    EEG Flanker Analysis — App Logic
+   Wavelet-based pipeline with per-channel exclusion
    ============================================ */
 
 const API = window.location.origin;
 let currentResultId = null;
-let uploadedSubjects = [];  // Track all uploaded subjects
+let currentData = null;              // last upload's full response
+let uploadedSubjects = [];           // [{ result_id, filename }]
 
-// Subject color palette for comparison charts
 const SUBJECT_COLORS = [
     '#5eead4', '#f472b6', '#818cf8', '#fb923c', '#a3e635',
     '#38bdf8', '#e879f9', '#fbbf24', '#f87171', '#34d399',
@@ -40,23 +41,20 @@ const plotlyLayout = {
         bordercolor: '#2a3040',
         font: { family: 'JetBrains Mono', size: 11, color: '#d8dce6' },
     },
-    hovermode: 'x unified',
-    spikedistance: -1,
+    hovermode: 'closest',
 };
-
-const plotlyConfig = {
-    displayModeBar: false,
-    responsive: true,
-};
+const plotlyConfig = { displayModeBar: false, responsive: true };
 
 const CON_COLOR = '#5eead4';
 const INC_COLOR = '#f472b6';
 const CON_COLOR_DIM = 'rgba(94,234,212,0.15)';
 const INC_COLOR_DIM = 'rgba(244,114,182,0.15)';
+const DIM_COLOR = 'rgba(160,160,180,0.35)';   // excluded trials
 
 // ── Background wave animation ──
 function initBgWave() {
     const canvas = document.getElementById('bg-wave');
+    if (!canvas) return;
     const ctx = canvas.getContext('2d');
     let w, h, t = 0;
 
@@ -92,7 +90,7 @@ function initBgWave() {
     draw();
 }
 
-// ── Upload handling ──
+// ── Upload ──
 function initUpload() {
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input');
@@ -100,23 +98,14 @@ function initUpload() {
     const errorEl = document.getElementById('upload-error');
 
     dropZone.addEventListener('click', () => fileInput.click());
-
-    dropZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropZone.classList.add('drag-over');
-    });
-
-    dropZone.addEventListener('dragleave', () => {
-        dropZone.classList.remove('drag-over');
-    });
-
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
     dropZone.addEventListener('drop', (e) => {
         e.preventDefault();
         dropZone.classList.remove('drag-over');
         const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.txt'));
         if (files.length > 0) uploadFiles(files);
     });
-
     fileInput.addEventListener('change', () => {
         const files = Array.from(fileInput.files).filter(f => f.name.endsWith('.txt'));
         if (files.length > 0) uploadFiles(files);
@@ -129,39 +118,30 @@ function initUpload() {
         const progressText = progress.querySelector('.progress-text');
         fill.classList.add('indeterminate');
 
-        const results = [];
         let lastData = null;
+        let count = 0;
 
         for (let i = 0; i < files.length; i++) {
             progressText.textContent = `Processing ${files[i].name} (${i + 1}/${files.length})...`;
-
             const formData = new FormData();
             formData.append('file', files[i]);
 
             try {
-                const resp = await fetch(`${API}/api/upload`, {
-                    method: 'POST',
-                    body: formData,
-                });
-
+                const resp = await fetch(`${API}/api/upload`, { method: 'POST', body: formData });
                 if (!resp.ok) {
                     const err = await resp.json();
                     throw new Error(`${files[i].name}: ${err.detail || 'Upload failed'}`);
                 }
-
                 const data = await resp.json();
-                results.push(data);
                 lastData = data;
+                count++;
 
-                // Track subject
-                const s = data.summary;
-                if (!uploadedSubjects.find(sub => sub.result_id === data.result_id)) {
+                if (!uploadedSubjects.find(s => s.result_id === data.result_id)) {
                     uploadedSubjects.push({
                         result_id: data.result_id,
-                        filename: s.filename,
+                        filename: data.summary.filename,
                     });
                 }
-
             } catch (err) {
                 fill.classList.remove('indeterminate');
                 progress.hidden = true;
@@ -173,14 +153,12 @@ function initUpload() {
 
         fill.classList.remove('indeterminate');
         fill.style.width = '100%';
-        progressText.textContent = `Done! ${results.length} file${results.length > 1 ? 's' : ''} processed.`;
+        progressText.textContent = `Done! ${count} file${count > 1 ? 's' : ''} processed.`;
 
         setTimeout(() => {
-            if (results.length === 1) {
-                // Single file → individual view
+            if (count === 1) {
                 showResults(lastData);
             } else {
-                // Multiple files → straight to comparison
                 document.getElementById('upload-section').hidden = true;
                 showComparison();
             }
@@ -188,12 +166,12 @@ function initUpload() {
     }
 }
 
-// ── Results display ──
+// ── Individual results ──
 function showResults(data) {
-    const s = data.summary;
     currentResultId = data.result_id;
+    currentData = data;
+    const s = data.summary;
 
-    // Hide upload, show results
     document.getElementById('upload-section').hidden = true;
     document.getElementById('results-section').hidden = false;
 
@@ -201,156 +179,204 @@ function showResults(data) {
     document.getElementById('info-filename').textContent = s.filename;
     document.getElementById('info-date').textContent = s.recording_date;
     document.getElementById('info-srate').textContent = `${s.sampling_rate} Hz`;
-    document.getElementById('info-epochs').textContent = `${s.n_epochs_congruent + s.n_epochs_incongruent} (${s.n_epochs_congruent} con / ${s.n_epochs_incongruent} inc)`;
+    document.getElementById('info-blocks').textContent = s.n_blocks;
+    document.getElementById('info-trials').textContent =
+        `${s.n_trials} · ${s.n_congruent} con / ${s.n_incongruent} inc`;
 
     // Channel names
-    const ch1 = s.channel_names[0] || 'Ch1';
-    const ch2 = s.channel_names[1] || 'Ch2';
-    document.getElementById('ch1-name').textContent = ch1;
-    document.getElementById('ch2-name').textContent = ch2;
-    document.getElementById('chart1-ch').textContent = ch1;
-    document.getElementById('chart2-ch').textContent = ch2;
-    document.getElementById('chart3-ch').textContent = ch1;
-    document.getElementById('chart4-ch').textContent = ch2;
+    document.getElementById('ch1-name').textContent = s.theta.channel;
+    document.getElementById('ch2-name').textContent = s.beta.channel;
 
-    // Power cards
-    document.getElementById('theta-con').textContent = s.theta_power_congruent.toFixed(4);
-    document.getElementById('theta-inc').textContent = s.theta_power_incongruent.toFixed(4);
-    document.getElementById('beta-con').textContent = s.beta_power_congruent.toFixed(4);
-    document.getElementById('beta-inc').textContent = s.beta_power_incongruent.toFixed(4);
-
-    // Power bars
-    const thetaMax = Math.max(s.theta_power_congruent, s.theta_power_incongruent);
-    const betaMax = Math.max(s.beta_power_congruent, s.beta_power_incongruent);
-    document.getElementById('theta-bar-con').style.width = `${(s.theta_power_congruent / thetaMax) * 50}%`;
-    document.getElementById('theta-bar-inc').style.width = `${(s.theta_power_incongruent / thetaMax) * 50}%`;
-    document.getElementById('beta-bar-con').style.width = `${(s.beta_power_congruent / betaMax) * 50}%`;
-    document.getElementById('beta-bar-inc').style.width = `${(s.beta_power_incongruent / betaMax) * 50}%`;
+    // Theta card
+    setCard('theta', s.theta);
+    // Beta card
+    setCard('beta', s.beta);
 
     // Charts
-    renderERPChart('chart-erp-ch1', data.waveforms.times_ms, data.waveforms.ch1_congruent, data.waveforms.ch1_incongruent, 'Amplitude (µV)');
-    renderERPChart('chart-erp-ch2', data.waveforms.times_ms, data.waveforms.ch2_congruent, data.waveforms.ch2_incongruent, 'Amplitude (µV)');
-    renderSpectrumChart('chart-spec-ch1', data.spectra.freqs, data.spectra.ch1_congruent, data.spectra.ch1_incongruent, 'Power (µV²/Hz)', [4, 8]);
-    renderSpectrumChart('chart-spec-ch2', data.spectra.freqs, data.spectra.ch2_congruent, data.spectra.ch2_incongruent, 'Power (µV²/Hz)', [13, 30]);
-    renderDistributionChart('chart-distribution', data.epoch_powers);
+    renderSpectrumChart('chart-spec-theta', data.spectra.freqs,
+        data.spectra.theta_congruent, data.spectra.theta_incongruent,
+        'Wavelet power (µV²)', s.config.theta_band);
+    renderSpectrumChart('chart-spec-beta', data.spectra.freqs,
+        data.spectra.beta_congruent, data.spectra.beta_incongruent,
+        'Wavelet power (µV²)', s.config.beta_band);
+    renderPerTrialChart('chart-trials-theta', data.trials, 'theta_rel', 'fz_exclude', 'Trial θ relative power');
+    renderPerTrialChart('chart-trials-beta',  data.trials, 'beta_rel',  'c3_exclude', 'Trial β relative power');
+    renderExclusionChart('chart-exclusion', data.trials, s.theta.channel, s.beta.channel);
+
+    // Excluded trials table
+    populateExcludedTable(data.trials);
 
     // Track this subject
-    if (!uploadedSubjects.find(s => s.result_id === data.result_id)) {
-        uploadedSubjects.push({
-            result_id: data.result_id,
-            filename: s.filename,
-        });
+    if (!uploadedSubjects.find(x => x.result_id === data.result_id)) {
+        uploadedSubjects.push({ result_id: data.result_id, filename: s.filename });
     }
     updateSubjectList();
     updateCompareButton();
 }
 
-function renderERPChart(containerId, times, conData, incData, yLabel) {
-    const traces = [
-        {
-            x: times, y: conData,
-            name: 'Congruent', type: 'scatter', mode: 'lines',
-            line: { color: CON_COLOR, width: 1.5 },
-        },
-        {
-            x: times, y: incData,
-            name: 'Incongruent', type: 'scatter', mode: 'lines',
-            line: { color: INC_COLOR, width: 1.5 },
-        },
-    ];
+function setCard(prefix, band) {
+    const relCon = band.rel_median_con ?? 0;
+    const relInc = band.rel_median_inc ?? 0;
+    const absCon = band.abs_median_con ?? 0;
+    const absInc = band.abs_median_inc ?? 0;
 
-    const layout = {
-        ...plotlyLayout,
-        xaxis: { ...plotlyLayout.xaxis, title: { text: 'Time (ms)', font: { size: 10 } },
-            showspikes: true, spikemode: 'across', spikethickness: 0.5,
-            spikecolor: 'rgba(94,234,212,0.2)', spikedash: 'dot' },
-        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
-        shapes: [{
-            type: 'line', x0: 0, x1: 0, y0: 0, y1: 1, yref: 'paper',
-            line: { color: 'rgba(94,234,212,0.3)', width: 1, dash: 'dot' },
-        }],
-    };
+    document.getElementById(`${prefix}-rel-con`).textContent = relCon.toFixed(3);
+    document.getElementById(`${prefix}-rel-inc`).textContent = relInc.toFixed(3);
+    document.getElementById(`${prefix}-abs-con`).textContent = `abs ${absCon.toFixed(2)}`;
+    document.getElementById(`${prefix}-abs-inc`).textContent = `abs ${absInc.toFixed(2)}`;
 
-    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
+    const relMax = Math.max(relCon, relInc, 0.001);
+    document.getElementById(`${prefix}-bar-con`).style.width = `${(relCon / relMax) * 50}%`;
+    document.getElementById(`${prefix}-bar-inc`).style.width = `${(relInc / relMax) * 50}%`;
+
+    document.getElementById(`${prefix}-survival`).textContent =
+        `${band.surviving}/${band.surviving + band.excluded} surviving · ` +
+        `con ${band.exclusion_pct_con}% / inc ${band.exclusion_pct_inc}% excluded`;
+
+    const flag = document.getElementById(`${prefix}-balance`);
+    flag.hidden = !band.balance_flag;
 }
 
+// ── Wavelet spectrum chart ──
 function renderSpectrumChart(containerId, freqs, conData, incData, yLabel, bandRange) {
     const traces = [
         {
-            x: freqs, y: conData,
-            name: 'Congruent', type: 'scatter', mode: 'lines',
-            line: { color: CON_COLOR, width: 1.5 },
+            x: freqs, y: conData, name: 'Congruent', type: 'scatter', mode: 'lines',
+            line: { color: CON_COLOR, width: 1.6 },
             fill: 'tozeroy', fillcolor: CON_COLOR_DIM,
         },
         {
-            x: freqs, y: incData,
-            name: 'Incongruent', type: 'scatter', mode: 'lines',
-            line: { color: INC_COLOR, width: 1.5 },
+            x: freqs, y: incData, name: 'Incongruent', type: 'scatter', mode: 'lines',
+            line: { color: INC_COLOR, width: 1.6 },
             fill: 'tozeroy', fillcolor: INC_COLOR_DIM,
         },
     ];
-
     const layout = {
         ...plotlyLayout,
-        xaxis: { ...plotlyLayout.xaxis, title: { text: 'Frequency (Hz)', font: { size: 10 } }, range: [0, 45],
-            showspikes: true, spikemode: 'across', spikethickness: 0.5,
-            spikecolor: 'rgba(94,234,212,0.2)', spikedash: 'dot' },
+        xaxis: { ...plotlyLayout.xaxis, title: { text: 'Frequency (Hz)', font: { size: 10 } }, range: [1, 40] },
         yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
         shapes: [{
             type: 'rect',
             x0: bandRange[0], x1: bandRange[1],
             y0: 0, y1: 1, yref: 'paper',
-            fillcolor: 'rgba(255,255,255,0.03)',
-            line: { color: 'rgba(255,255,255,0.1)', width: 1 },
+            fillcolor: 'rgba(255,255,255,0.04)',
+            line: { color: 'rgba(255,255,255,0.12)', width: 1 },
         }],
     };
-
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
 }
 
-function renderDistributionChart(containerId, epochPowers) {
-    const conTheta = epochPowers.filter(e => e.condition === 'congruent').map(e => e.theta_power);
-    const incTheta = epochPowers.filter(e => e.condition === 'incongruent').map(e => e.theta_power);
-    const conBeta = epochPowers.filter(e => e.condition === 'congruent').map(e => e.beta_power);
-    const incBeta = epochPowers.filter(e => e.condition === 'incongruent').map(e => e.beta_power);
+// ── Per-trial power scatter ──
+function renderPerTrialChart(containerId, trials, powerKey, excludeKey, yLabel) {
+    // Split by condition × surviving/excluded → four traces
+    function subset(cond, excluded) {
+        return trials.filter(t => t.cond === cond && !!t[excludeKey] === excluded);
+    }
+    const survCon = subset('con', false);
+    const survInc = subset('first', false);
+    const excCon  = subset('con', true);
+    const excInc  = subset('first', true);
+
+    const trace = (data, name, color, opacity) => ({
+        x: data.map(t => t.trial),
+        y: data.map(t => t[powerKey]),
+        text: data.map(t => `#${t.trial} · b${t.block} · RT ${t.rt_ms}ms${t.reason ? '<br>' + t.reason : ''}`),
+        hovertemplate: `<b>${name}</b><br>%{text}<br>power=%{y:.3f}<extra></extra>`,
+        name, type: 'scatter', mode: 'markers',
+        marker: { color, size: 6, opacity, line: { width: 0 } },
+    });
 
     const traces = [
-        {
-            y: conTheta, name: 'θ Congruent', type: 'violin',
-            side: 'negative', line: { color: CON_COLOR, width: 1.5 },
-            fillcolor: CON_COLOR_DIM, meanline: { visible: true },
-            scalemode: 'width', width: 1.8, x0: 'Theta',
-        },
-        {
-            y: incTheta, name: 'θ Incongruent', type: 'violin',
-            side: 'positive', line: { color: INC_COLOR, width: 1.5 },
-            fillcolor: INC_COLOR_DIM, meanline: { visible: true },
-            scalemode: 'width', width: 1.8, x0: 'Theta',
-        },
-        {
-            y: conBeta, name: 'β Congruent', type: 'violin',
-            side: 'negative', line: { color: CON_COLOR, width: 1.5 },
-            fillcolor: CON_COLOR_DIM, meanline: { visible: true },
-            scalemode: 'width', width: 1.8, x0: 'Beta',
-        },
-        {
-            y: incBeta, name: 'β Incongruent', type: 'violin',
-            side: 'positive', line: { color: INC_COLOR, width: 1.5 },
-            fillcolor: INC_COLOR_DIM, meanline: { visible: true },
-            scalemode: 'width', width: 1.8, x0: 'Beta',
-        },
+        trace(survCon, 'Congruent (kept)',   CON_COLOR, 0.85),
+        trace(survInc, 'Incongruent (kept)', INC_COLOR, 0.85),
+        trace(excCon,  'Congruent (excluded)',   DIM_COLOR, 0.6),
+        trace(excInc,  'Incongruent (excluded)', DIM_COLOR, 0.6),
     ];
 
     const layout = {
         ...plotlyLayout,
-        yaxis: { ...plotlyLayout.yaxis, title: { text: 'Power (µV²/Hz)', font: { size: 10 } } },
-        violinmode: 'overlay',
+        xaxis: { ...plotlyLayout.xaxis, title: { text: 'Trial number', font: { size: 10 } } },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
     };
-
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
 }
 
-// ── Subject list management ──
+// ── Exclusion breakdown ──
+function renderExclusionChart(containerId, trials, ch1Label, ch2Label) {
+    // Bucket reasons per channel
+    function count(exKey, patterns) {
+        return trials.reduce((acc, t) => {
+            if (!t[exKey]) return acc;
+            const r = t.reason || '';
+            for (const [label, re] of patterns) {
+                if (re.test(r)) { acc[label] = (acc[label] || 0) + 1; }
+            }
+            return acc;
+        }, {});
+    }
+    const patterns = [
+        ['Blink',                /blink/],
+        ['Coincident transient', /coincident/],
+        ['Gross EMG',            /gross EMG/],
+        ['C3 burst',             /burst/],
+    ];
+    const fzCounts = count('fz_exclude', patterns);
+    const c3Counts = count('c3_exclude', patterns);
+    const labels = patterns.map(p => p[0]);
+
+    const traces = [
+        {
+            name: ch1Label, type: 'bar',
+            x: labels, y: labels.map(l => fzCounts[l] || 0),
+            marker: { color: '#5eead4', opacity: 0.85 },
+        },
+        {
+            name: ch2Label, type: 'bar',
+            x: labels, y: labels.map(l => c3Counts[l] || 0),
+            marker: { color: '#f472b6', opacity: 0.85 },
+        },
+    ];
+    const layout = {
+        ...plotlyLayout,
+        barmode: 'group', bargap: 0.35, bargroupgap: 0.15,
+        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 10 } },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: 'Excluded trials', font: { size: 10 } } },
+    };
+    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
+}
+
+// ── Excluded trials table ──
+function populateExcludedTable(trials) {
+    const excluded = trials.filter(t => t.fz_exclude || t.c3_exclude);
+    const section = document.getElementById('excluded-section');
+    const countEl = document.getElementById('excluded-count');
+    const tbody = document.querySelector('#excluded-table tbody');
+
+    if (excluded.length === 0) {
+        section.hidden = true;
+        return;
+    }
+    section.hidden = false;
+    countEl.textContent = `(${excluded.length})`;
+
+    tbody.innerHTML = excluded.map(t => `
+        <tr>
+            <td>${t.trial}</td>
+            <td>${t.block}</td>
+            <td>${t.condition}</td>
+            <td>${t.rt_ms} ms</td>
+            <td>${t.fz_ptp.toFixed(1)} µV</td>
+            <td>${t.maxz.toFixed(2)}</td>
+            <td>${t.impact.toFixed(1)}%</td>
+            <td>${t.coinc.toFixed(2)}</td>
+            <td class="${t.fz_exclude ? 'flag-yes' : 'flag-no'}">${t.fz_exclude ? '✕' : '·'}</td>
+            <td class="${t.c3_exclude ? 'flag-yes' : 'flag-no'}">${t.c3_exclude ? '✕' : '·'}</td>
+            <td>${t.reason}</td>
+        </tr>
+    `).join('');
+}
+
+// ── Subject list ──
 function updateSubjectList() {
     const listEl = document.getElementById('subject-list');
     const itemsEl = document.getElementById('subject-items');
@@ -385,7 +411,7 @@ function updateCompareButton() {
         : `Compare ${uploadedSubjects.length} Subjects`;
 }
 
-// ── Comparison view ──
+// ── Group comparison ──
 async function showComparison() {
     try {
         const resp = await fetch(`${API}/api/compare`);
@@ -400,88 +426,116 @@ async function showComparison() {
         document.getElementById('results-section').hidden = true;
         document.getElementById('compare-section').hidden = false;
 
-        // Build comparison table
+        // Table
         const thead = document.querySelector('#compare-table thead');
         const tbody = document.querySelector('#compare-table tbody');
         thead.innerHTML = `<tr>
             <th></th><th>Subject</th><th>Date</th>
-            <th>θ Con</th><th>θ Inc</th>
-            <th>β Con</th><th>β Inc</th>
-            <th>Epochs</th>
+            <th>θ rel con</th><th>θ rel inc</th><th>θ Δ</th>
+            <th>β rel con</th><th>β rel inc</th>
+            <th>θ surv</th><th>β surv</th>
         </tr>`;
-        tbody.innerHTML = subjects.map((s, i) => `<tr>
-            <td><span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]};display:inline-block;width:8px;height:8px;border-radius:50%"></span></td>
-            <td>${s.filename}</td>
-            <td>${s.recording_date}</td>
-            <td class="val-con">${s.theta_power_congruent.toFixed(2)}</td>
-            <td class="val-inc">${s.theta_power_incongruent.toFixed(2)}</td>
-            <td class="val-con">${s.beta_power_congruent.toFixed(2)}</td>
-            <td class="val-inc">${s.beta_power_incongruent.toFixed(2)}</td>
-            <td>${s.n_epochs_congruent + s.n_epochs_incongruent}</td>
-        </tr>`).join('');
+        tbody.innerHTML = subjects.map((subj, i) => {
+            const s = subj.summary;
+            const dTheta = s.theta.rel_median_inc - s.theta.rel_median_con;
+            const dcol = dTheta > 0 ? 'val-inc' : 'val-con';
+            const balTh = s.theta.balance_flag ? ' ⚠' : '';
+            const balBe = s.beta.balance_flag ? ' ⚠' : '';
+            return `<tr>
+                <td><span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]};display:inline-block;width:8px;height:8px;border-radius:50%"></span></td>
+                <td>${s.filename}</td>
+                <td>${s.recording_date}</td>
+                <td class="val-con">${s.theta.rel_median_con.toFixed(3)}</td>
+                <td class="val-inc">${s.theta.rel_median_inc.toFixed(3)}</td>
+                <td class="${dcol}">${dTheta >= 0 ? '+' : ''}${dTheta.toFixed(3)}</td>
+                <td class="val-con">${s.beta.rel_median_con.toFixed(3)}</td>
+                <td class="val-inc">${s.beta.rel_median_inc.toFixed(3)}</td>
+                <td>${s.theta.surviving}/${s.n_trials}${balTh}</td>
+                <td>${s.beta.surviving}/${s.n_trials}${balBe}</td>
+            </tr>`;
+        }).join('');
 
-        // Theta grouped bar chart
-        renderGroupedBar('chart-compare-theta', subjects, 'theta_power_congruent', 'theta_power_incongruent', 'θ Power (µV²/Hz)');
-        // Beta grouped bar chart
-        renderGroupedBar('chart-compare-beta', subjects, 'beta_power_congruent', 'beta_power_incongruent', 'β Power (µV²/Hz)');
-        // Overlaid ERPs
-        renderOverlaidERP('chart-compare-erp-ch1-con', subjects, 'ch1_congruent', 'Congruent — Amplitude (µV)');
-        renderOverlaidERP('chart-compare-erp-ch1-inc', subjects, 'ch1_incongruent', 'Incongruent — Amplitude (µV)');
+        // Grouped bars: relative power
+        renderGroupedBar('chart-compare-theta', subjects,
+            s => s.summary.theta.rel_median_con, s => s.summary.theta.rel_median_inc,
+            'θ relative power');
+        renderGroupedBar('chart-compare-beta', subjects,
+            s => s.summary.beta.rel_median_con, s => s.summary.beta.rel_median_inc,
+            'β relative power');
+
+        // Exclusion rate stacked chart
+        renderExclusionCompareChart('chart-compare-exclusion', subjects);
+
+        // Congruency effect (θ inc - con)
+        renderEffectChart('chart-compare-effect', subjects);
 
     } catch (err) {
         alert('Error loading comparison: ' + err.message);
     }
 }
 
-function renderGroupedBar(containerId, subjects, conKey, incKey, yLabel) {
-    const names = subjects.map(s => s.result_id);
+function renderGroupedBar(containerId, subjects, conFn, incFn, yLabel) {
+    const names = subjects.map(s => s.summary.filename);
+    const traces = [
+        { x: names, y: subjects.map(conFn), name: 'Congruent',   type: 'bar', marker: { color: CON_COLOR, opacity: 0.85 } },
+        { x: names, y: subjects.map(incFn), name: 'Incongruent', type: 'bar', marker: { color: INC_COLOR, opacity: 0.85 } },
+    ];
+    const layout = {
+        ...plotlyLayout,
+        barmode: 'group', bargap: 0.3, bargroupgap: 0.1,
+        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
+    };
+    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
+}
+
+function renderExclusionCompareChart(containerId, subjects) {
+    const names = subjects.map(s => s.summary.filename);
     const traces = [
         {
-            x: names, y: subjects.map(s => s[conKey]),
-            name: 'Congruent', type: 'bar',
-            marker: { color: CON_COLOR, opacity: 0.8 },
+            x: names,
+            y: subjects.map(s => 100 * s.summary.theta.excluded / s.summary.n_trials),
+            name: 'θ excl % (Fz-Pz)', type: 'bar',
+            marker: { color: '#5eead4', opacity: 0.85 },
         },
         {
-            x: names, y: subjects.map(s => s[incKey]),
-            name: 'Incongruent', type: 'bar',
-            marker: { color: INC_COLOR, opacity: 0.8 },
+            x: names,
+            y: subjects.map(s => 100 * s.summary.beta.excluded / s.summary.n_trials),
+            name: 'β excl % (C3-C4)', type: 'bar',
+            marker: { color: '#f472b6', opacity: 0.85 },
         },
     ];
     const layout = {
         ...plotlyLayout,
-        barmode: 'group',
-        bargap: 0.3,
-        bargroupgap: 0.1,
+        barmode: 'group', bargap: 0.3, bargroupgap: 0.1,
         xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
-        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
-        hovermode: 'closest',
+        yaxis: { ...plotlyLayout.yaxis, title: { text: '% excluded', font: { size: 10 } }, rangemode: 'tozero' },
     };
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
 }
 
-function renderOverlaidERP(containerId, subjects, waveKey, yLabel) {
-    const traces = subjects.map((s, i) => ({
-        x: s.waveforms.times_ms,
-        y: s.waveforms[waveKey],
-        name: s.result_id,
-        type: 'scatter', mode: 'lines',
-        line: { color: SUBJECT_COLORS[i % SUBJECT_COLORS.length], width: 1.5 },
-    }));
+function renderEffectChart(containerId, subjects) {
+    const names = subjects.map(s => s.summary.filename);
+    const effects = subjects.map(s => s.summary.theta.rel_median_inc - s.summary.theta.rel_median_con);
+    const colors  = effects.map(e => e >= 0 ? INC_COLOR : DIM_COLOR);
+    const traces = [{
+        x: names, y: effects, name: 'θ inc − con',
+        type: 'bar', marker: { color: colors, opacity: 0.85 },
+    }];
     const layout = {
         ...plotlyLayout,
-        xaxis: { ...plotlyLayout.xaxis, title: { text: 'Time (ms)', font: { size: 10 } },
-            showspikes: true, spikemode: 'across', spikethickness: 0.5,
-            spikecolor: 'rgba(94,234,212,0.2)', spikedash: 'dot' },
-        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
-        shapes: [{
-            type: 'line', x0: 0, x1: 0, y0: 0, y1: 1, yref: 'paper',
-            line: { color: 'rgba(94,234,212,0.3)', width: 1, dash: 'dot' },
-        }],
+        showlegend: false,
+        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
+        yaxis: {
+            ...plotlyLayout.yaxis,
+            title: { text: 'Δ theta relative power', font: { size: 10 } },
+            zeroline: true, zerolinecolor: 'rgba(255,255,255,0.15)', zerolinewidth: 1,
+        },
     };
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
 }
 
-// ── Navigation helpers ──
+// ── Navigation ──
 function goToUpload() {
     document.getElementById('results-section').hidden = true;
     document.getElementById('compare-section').hidden = true;
@@ -490,31 +544,27 @@ function goToUpload() {
     document.getElementById('file-input').value = '';
 }
 
-// ── Actions ──
+// ── Buttons ──
 function initActions() {
     document.getElementById('btn-download').addEventListener('click', () => {
-        if (currentResultId) {
-            window.location.href = `${API}/api/download-csv/${currentResultId}`;
-        }
+        if (currentResultId) window.location.href = `${API}/api/download-csv/${currentResultId}`;
     });
-
     document.getElementById('btn-download-trials').addEventListener('click', () => {
-        if (currentResultId) {
-            window.location.href = `${API}/api/download-csv-trials/${currentResultId}`;
-        }
+        if (currentResultId) window.location.href = `${API}/api/download-csv-trials/${currentResultId}`;
     });
-
+    document.getElementById('btn-download-exclusions').addEventListener('click', () => {
+        if (currentResultId) window.location.href = `${API}/api/download-csv-exclusions/${currentResultId}`;
+    });
     document.getElementById('btn-add-subject').addEventListener('click', () => goToUpload());
-
     document.getElementById('btn-compare').addEventListener('click', () => showComparison());
 
     document.getElementById('btn-new').addEventListener('click', async () => {
-        // Clear all subjects from server
         for (const s of uploadedSubjects) {
             await fetch(`${API}/api/subjects/${s.result_id}`, { method: 'DELETE' });
         }
         uploadedSubjects = [];
         currentResultId = null;
+        currentData = null;
         goToUpload();
     });
 
@@ -526,17 +576,14 @@ function initActions() {
     document.getElementById('btn-download-all').addEventListener('click', () => {
         window.location.href = `${API}/api/download-csv-all`;
     });
-
     document.getElementById('btn-download-trials-all').addEventListener('click', () => {
         window.location.href = `${API}/api/download-csv-trials-all`;
     });
-
     document.getElementById('btn-add-more').addEventListener('click', () => {
         document.getElementById('compare-section').hidden = true;
         goToUpload();
     });
 
-    // Header click → go home (reset to upload view)
     document.getElementById('header-home-link').addEventListener('click', (e) => {
         e.preventDefault();
         document.getElementById('compare-section').hidden = true;
@@ -545,7 +592,6 @@ function initActions() {
     });
 }
 
-// ── Init ──
 document.addEventListener('DOMContentLoaded', () => {
     initBgWave();
     initUpload();

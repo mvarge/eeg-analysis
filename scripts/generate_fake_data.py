@@ -43,8 +43,8 @@ def generate_eeg_signal(n_samples, fs, theta_power=1.0, beta_power=0.5, alpha_po
     pink = np.fft.irfft(fft, n_samples) * 3
     signal += pink
     
-    # Scale to realistic µV range
-    signal *= 8
+    # Scale to realistic µV range (target: p-t-p ~10-30 µV, beta FFT ~20-50k)
+    signal *= 3.0
     
     return signal
 
@@ -106,11 +106,13 @@ def generate_subject_file(filepath, subject_id, seed=None):
         current_time += gap
         current_sample = int(current_time * fs)
     
-    # Block 1→2 boundary: 'first' (block 2 start) then 'second'
-    markers.append((current_sample, current_time, 'first'))  # block 2 start
-    current_time += 0.3
+    # Block 1→2 boundary: real recordings have a long pause (>30s) between blocks.
+    # The parser uses this gap to detect block boundaries. LabChart marks a `second`
+    # at the end of block 1 and typically has a stray `first` before block 2 starts.
+    markers.append((current_sample, current_time, 'second'))     # block 1 end
+    current_time += np.random.uniform(45.0, 90.0)                # long inter-block pause
     current_sample = int(current_time * fs)
-    markers.append((current_sample, current_time, 'second'))  # block boundary
+    markers.append((current_sample, current_time, 'first'))      # block 2 start marker (orphan, no key follows)
     current_time += np.random.uniform(0.5, 0.8)
     current_sample = int(current_time * fs)
     
@@ -150,7 +152,7 @@ def generate_subject_file(filepath, subject_id, seed=None):
                 for freq in np.linspace(4, 8, 3):
                     phase = np.random.uniform(0, 2 * np.pi)
                     tt = np.arange(n) / fs
-                    boost_signal += 2.0 * theta_inc_boost * np.sin(2 * np.pi * freq * tt + phase)
+                    boost_signal += 0.8 * theta_inc_boost * np.sin(2 * np.pi * freq * tt + phase)
                 # Apply with a Hanning window for smooth onset
                 window = np.hanning(n)
                 ch1[start:end] += boost_signal * window

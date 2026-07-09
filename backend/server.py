@@ -1,38 +1,47 @@
 """
-FastAPI server for EEG analysis.
+FastAPI server for the EEG Flanker Analysis tool.
 
-Serves the frontend and provides API endpoints for:
-- File upload and processing
-- Results retrieval
-- CSV download
+Wraps the parser + pipeline and exposes:
+  POST /api/upload                         upload + analyse one LabChart file
+  GET  /api/subjects                       list all in-memory results
+  DELETE /api/subjects/{id}                drop one from memory
+  GET  /api/compare                        aggregate data for group view
+  GET  /api/download-csv-trials/{id}       per-trial CSV (results.csv format)
+  GET  /api/download-csv-exclusions/{id}   excluded-trials CSV (exclusions.csv)
+  GET  /api/download-csv/{id}              per-subject summary (medians)
+  GET  /api/download-csv-trials-all        combined per-trial CSV
+  GET  /api/download-csv-all               combined summary CSV
+  GET  /api/download-csv-batch-summary     batch summary with balance flags
 """
 
+from __future__ import annotations
+
+import csv
+import io
+import math
 import os
 import tempfile
-import io
-import csv
+from dataclasses import asdict
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from typing import Dict, List
+
+import numpy as np
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from parser import parse_labchart
-from pipeline import run_pipeline
+from pipeline import (
+    PipelineResult, TrialResult, ChannelSummary,
+    BLINK_UV, EMG_BETA, BURST_Z, BURST_IMPACT, COINC_Z,
+    HP_HZ, WIN_S, PAD_S, THETA_BAND, BETA_BAND, TOTAL_BAND,
+    run_pipeline,
+)
 
-import math
-import numpy as np
-
-
-def sanitize_for_json(val):
-    """Replace NaN/Inf with None for JSON serialization."""
-    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-        return None
-    return val
 
 app = FastAPI(title="EEG Flanker Analysis")
 
-# CORS for local development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,312 +49,315 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Store results in memory (single-user local app)
-_results = {}
+_results: Dict[str, PipelineResult] = {}
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 
-def downsample_for_json(arr: np.ndarray, max_points: int = 500) -> list:
-    """Downsample array for JSON transport if too large."""
-    if len(arr) == 0:
-        return []
-    if len(arr) <= max_points:
-        return arr.tolist()
-    indices = np.linspace(0, len(arr) - 1, max_points, dtype=int)
-    return arr[indices].tolist()
+# ============================================================
+#  Helpers
+# ============================================================
+def _safe(x):
+    """Replace NaN/Inf with None for JSON."""
+    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+        return None
+    return x
 
 
-def downsample_pair(times: np.ndarray, values: np.ndarray, max_points: int = 500):
-    """Downsample both time and value arrays consistently."""
-    if len(times) == 0:
-        return [], []
-    if len(times) <= max_points:
-        return times.tolist(), values.tolist()
-    indices = np.linspace(0, len(times) - 1, max_points, dtype=int)
-    return times[indices].tolist(), values[indices].tolist()
+def _condition_label(cond: str) -> str:
+    """Convert internal marker label to display condition."""
+    return "congruent" if cond == "con" else "incongruent"
 
 
+def _summary_payload(r: PipelineResult) -> dict:
+    """Structured summary for the frontend."""
+    return {
+        "filename": r.filename,
+        "recording_date": r.recording_date,
+        "sampling_rate": r.sampling_rate,
+        "channel_names": r.channel_names,
+        "n_trials": r.n_trials,
+        "n_blocks": r.n_blocks,
+        "n_congruent": sum(1 for t in r.trials if t.cond == "con"),
+        "n_incongruent": sum(1 for t in r.trials if t.cond == "first"),
+        "theta": _channel_payload(r.theta_summary),
+        "beta":  _channel_payload(r.beta_summary),
+        "config": {
+            "hp_hz": HP_HZ,
+            "window_s": WIN_S,
+            "pad_s": PAD_S,
+            "theta_band": list(THETA_BAND),
+            "beta_band": list(BETA_BAND),
+            "total_band": list(TOTAL_BAND),
+            "blink_uv": BLINK_UV,
+            "emg_beta": EMG_BETA,
+            "burst_z": BURST_Z,
+            "burst_impact": BURST_IMPACT,
+            "coinc_z": COINC_Z,
+        },
+    }
+
+
+def _channel_payload(s: ChannelSummary) -> dict:
+    return {
+        "channel": s.channel,
+        "band": s.band,
+        "surviving": s.surviving,
+        "excluded": s.excluded,
+        "surviving_by_condition": s.surviving_by_condition,
+        "excluded_by_condition": s.excluded_by_condition,
+        "exclusion_pct_con": _safe(round(s.exclusion_pct_con, 1)),
+        "exclusion_pct_inc": _safe(round(s.exclusion_pct_inc, 1)),
+        "balance_flag": s.balance_flag,
+        "abs_median_con": _safe(round(s.abs_median_con, 3)),
+        "abs_median_inc": _safe(round(s.abs_median_inc, 3)),
+        "rel_median_con": _safe(round(s.rel_median_con, 4)),
+        "rel_median_inc": _safe(round(s.rel_median_inc, 4)),
+    }
+
+
+def _trial_row(t: TrialResult) -> dict:
+    """Trial payload for the frontend (rounded for JSON size)."""
+    return {
+        "trial": t.trial,
+        "btrial": t.btrial,
+        "block": t.block,
+        "cond": t.cond,
+        "condition": _condition_label(t.cond),
+        "onset": round(t.onset, 3),
+        "key": round(t.key, 3),
+        "rt_ms": t.rt_ms,
+        "fz_ptp": round(t.fz_ptp, 2),
+        "theta_fft": round(t.theta_fft, 2),
+        "beta_fft": round(t.beta_fft, 2),
+        "maxz": round(t.maxz, 3),
+        "impact": round(t.impact, 2),
+        "coinc": round(t.coinc, 3),
+        "blink": t.blink,
+        "fz_exclude": t.fz_exclude,
+        "c3_exclude": t.c3_exclude,
+        "reason": t.reason,
+        "theta_abs": round(t.theta_abs, 3),
+        "theta_rel": round(t.theta_rel, 4),
+        "beta_abs":  round(t.beta_abs, 3),
+        "beta_rel":  round(t.beta_rel, 4),
+    }
+
+
+def _spectra_payload(r: PipelineResult) -> dict:
+    """Wavelet spectra (averaged across surviving trials) for plotting."""
+    return {
+        "freqs": r.spectrum_freqs.tolist(),
+        "theta_congruent":   r.theta_spectrum_con.tolist(),
+        "theta_incongruent": r.theta_spectrum_inc.tolist(),
+        "beta_congruent":    r.beta_spectrum_con.tolist(),
+        "beta_incongruent":  r.beta_spectrum_inc.tolist(),
+    }
+
+
+# ============================================================
+#  Endpoints
+# ============================================================
 @app.post("/api/upload")
 async def upload_eeg(file: UploadFile = File(...)):
-    """Upload and process a LabChart EEG text export."""
+    """Upload and analyse a LabChart .txt export."""
     if not file.filename.endswith(".txt"):
         raise HTTPException(400, "Please upload a .txt LabChart export file")
 
-    # Save to temp file
     content = await file.read()
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="wb") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
     try:
-        # Parse
         parsed = parse_labchart(tmp_path)
-        # Override filename with the original upload name (strip .txt extension)
         parsed.filename = file.filename.replace(".txt", "")
 
-        # Run pipeline
         result = run_pipeline(parsed)
-
-        # Store for later retrieval
-        result_id = file.filename.replace(".txt", "")
+        result_id = parsed.filename
         _results[result_id] = result
-
-        # Build JSON response
-        # Downsample waveforms for transport
-        epoch_times_ds, avg_ch1_con_ds = downsample_pair(
-            result.epoch_times * 1000,  # convert to ms
-            result.avg_ch1_congruent
-        )
-        _, avg_ch1_inc_ds = downsample_pair(result.epoch_times * 1000, result.avg_ch1_incongruent)
-        _, avg_ch2_con_ds = downsample_pair(result.epoch_times * 1000, result.avg_ch2_congruent)
-        _, avg_ch2_inc_ds = downsample_pair(result.epoch_times * 1000, result.avg_ch2_incongruent)
-
-        # Power spectra (limit to 0-50 Hz for display)
-        freq_mask = result.spectrum_freqs <= 50
-        spec_freqs = result.spectrum_freqs[freq_mask]
-        spec_ch1_con = result.avg_spectrum_ch1_con[freq_mask] if len(result.avg_spectrum_ch1_con) > 0 else np.array([])
-        spec_ch1_inc = result.avg_spectrum_ch1_inc[freq_mask] if len(result.avg_spectrum_ch1_inc) > 0 else np.array([])
-        spec_ch2_con = result.avg_spectrum_ch2_con[freq_mask] if len(result.avg_spectrum_ch2_con) > 0 else np.array([])
-        spec_ch2_inc = result.avg_spectrum_ch2_inc[freq_mask] if len(result.avg_spectrum_ch2_inc) > 0 else np.array([])
-
-        # Per-epoch power values for scatter/distribution plots
-        epoch_powers = []
-        for p in result.power_results:
-            epoch_powers.append({
-                "trial": p.trial_index,
-                "condition": p.condition,
-                "block": p.block,
-                "theta_power": round(float(p.ch1_theta_power), 6),
-                "beta_power": round(float(p.ch2_beta_power), 6),
-            })
 
         return {
             "status": "success",
             "result_id": result_id,
-            "summary": {
-                "filename": result.filename,
-                "recording_date": result.recording_date,
-                "sampling_rate": result.sampling_rate,
-                "channel_names": result.channel_names,
-                "theta_power_congruent": sanitize_for_json(round(result.theta_power_congruent, 6)),
-                "theta_power_incongruent": sanitize_for_json(round(result.theta_power_incongruent, 6)),
-                "beta_power_congruent": sanitize_for_json(round(result.beta_power_congruent, 6)),
-                "beta_power_incongruent": sanitize_for_json(round(result.beta_power_incongruent, 6)),
-                "n_epochs_congruent": result.n_epochs_congruent,
-                "n_epochs_incongruent": result.n_epochs_incongruent,
-            },
-            "waveforms": {
-                "times_ms": epoch_times_ds,
-                "ch1_congruent": avg_ch1_con_ds,
-                "ch1_incongruent": avg_ch1_inc_ds,
-                "ch2_congruent": avg_ch2_con_ds,
-                "ch2_incongruent": avg_ch2_inc_ds,
-            },
-            "spectra": {
-                "freqs": spec_freqs.tolist(),
-                "ch1_congruent": spec_ch1_con.tolist(),
-                "ch1_incongruent": spec_ch1_inc.tolist(),
-                "ch2_congruent": spec_ch2_con.tolist(),
-                "ch2_incongruent": spec_ch2_inc.tolist(),
-            },
-            "epoch_powers": epoch_powers,
+            "summary": _summary_payload(result),
+            "trials": [_trial_row(t) for t in result.trials],
+            "spectra": _spectra_payload(result),
         }
 
     except Exception as e:
-        raise HTTPException(500, f"Processing error: {str(e)}")
+        raise HTTPException(500, f"Processing error: {e}")
     finally:
         os.unlink(tmp_path)
-
-
-@app.get("/api/download-csv/{result_id}")
-async def download_csv(result_id: str):
-    """Download SPSS-ready summary CSV."""
-    if result_id not in _results:
-        raise HTTPException(404, "Result not found. Please upload a file first.")
-
-    r = _results[result_id]
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
-        "filename", "recording_date",
-        "theta_power_congruent", "theta_power_incongruent",
-        "beta_power_congruent", "beta_power_incongruent",
-        "n_epochs_congruent", "n_epochs_incongruent",
-    ])
-    writer.writerow([
-        r.filename, r.recording_date,
-        round(r.theta_power_congruent, 6),
-        round(r.theta_power_incongruent, 6),
-        round(r.beta_power_congruent, 6),
-        round(r.beta_power_incongruent, 6),
-        r.n_epochs_congruent, r.n_epochs_incongruent,
-    ])
-
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={result_id}_summary.csv"},
-    )
 
 
 @app.get("/api/subjects")
 async def list_subjects():
     """List all uploaded subjects."""
-    subjects = []
-    for rid, r in _results.items():
-        subjects.append({
-            "result_id": rid,
-            "filename": r.filename,
-            "recording_date": r.recording_date,
-            "sampling_rate": r.sampling_rate,
-            "n_epochs_congruent": r.n_epochs_congruent,
-            "n_epochs_incongruent": r.n_epochs_incongruent,
-        })
-    return {"subjects": subjects}
+    return {
+        "subjects": [
+            {
+                "result_id": rid,
+                "filename": r.filename,
+                "recording_date": r.recording_date,
+                "n_trials": r.n_trials,
+                "theta_surviving": r.theta_summary.surviving,
+                "beta_surviving": r.beta_summary.surviving,
+            }
+            for rid, r in _results.items()
+        ]
+    }
 
 
 @app.delete("/api/subjects/{result_id}")
 async def remove_subject(result_id: str):
-    """Remove a subject from memory."""
-    if result_id in _results:
-        del _results[result_id]
+    """Drop one subject from memory."""
+    _results.pop(result_id, None)
     return {"status": "ok"}
 
 
 @app.get("/api/compare")
 async def compare_subjects():
-    """Compare all uploaded subjects — returns summary + power data for group charts."""
+    """Aggregate payload for the group view."""
     if len(_results) < 2:
         raise HTTPException(400, "Need at least 2 subjects to compare. Upload more files.")
 
-    subjects = []
-    for rid, r in _results.items():
-        # Waveforms downsampled
-        epoch_times_ds, avg_ch1_con_ds = downsample_pair(
-            r.epoch_times * 1000, r.avg_ch1_congruent
-        )
-        _, avg_ch1_inc_ds = downsample_pair(r.epoch_times * 1000, r.avg_ch1_incongruent)
-        _, avg_ch2_con_ds = downsample_pair(r.epoch_times * 1000, r.avg_ch2_congruent)
-        _, avg_ch2_inc_ds = downsample_pair(r.epoch_times * 1000, r.avg_ch2_incongruent)
-
-        subjects.append({
-            "result_id": rid,
-            "filename": r.filename,
-            "recording_date": r.recording_date,
-            "channel_names": r.channel_names,
-            "theta_power_congruent": round(r.theta_power_congruent, 6),
-            "theta_power_incongruent": round(r.theta_power_incongruent, 6),
-            "beta_power_congruent": round(r.beta_power_congruent, 6),
-            "beta_power_incongruent": round(r.beta_power_incongruent, 6),
-            "n_epochs_congruent": r.n_epochs_congruent,
-            "n_epochs_incongruent": r.n_epochs_incongruent,
-            "waveforms": {
-                "times_ms": epoch_times_ds,
-                "ch1_congruent": avg_ch1_con_ds,
-                "ch1_incongruent": avg_ch1_inc_ds,
-                "ch2_congruent": avg_ch2_con_ds,
-                "ch2_incongruent": avg_ch2_inc_ds,
-            },
-        })
-
-    return {"subjects": subjects}
+    return {
+        "subjects": [
+            {
+                "result_id": rid,
+                "summary": _summary_payload(r),
+                "trials": [_trial_row(t) for t in r.trials],
+            }
+            for rid, r in _results.items()
+        ]
+    }
 
 
-@app.get("/api/download-csv-all")
-async def download_csv_all():
-    """Download combined SPSS-ready summary CSV for all subjects (one row per subject)."""
-    if not _results:
-        raise HTTPException(404, "No results. Upload files first.")
-
+# ============================================================
+#  CSV downloads
+# ============================================================
+def _csv_response(rows: List[list], header: list, filename: str) -> StreamingResponse:
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow([
-        "subject", "recording_date",
-        "theta_power_congruent", "theta_power_incongruent",
-        "beta_power_congruent", "beta_power_incongruent",
-        "n_epochs_congruent", "n_epochs_incongruent",
-    ])
-    for r in _results.values():
-        writer.writerow([
-            r.filename, r.recording_date,
-            round(r.theta_power_congruent, 6),
-            round(r.theta_power_incongruent, 6),
-            round(r.beta_power_congruent, 6),
-            round(r.beta_power_incongruent, 6),
-            r.n_epochs_congruent, r.n_epochs_incongruent,
-        ])
-
+    writer.writerow(header)
+    writer.writerows(rows)
     output.seek(0)
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=eeg_group_summary.csv"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+TRIAL_CSV_HEADER = [
+    "recording", "trial", "block", "btrial", "cond", "onset", "key", "rt_ms",
+    "fz_ptp", "theta_fft", "beta_fft", "maxz", "impact", "coinc",
+    "blink", "fz_exclude", "c3_exclude", "reason",
+    "theta_abs", "theta_rel", "beta_abs", "beta_rel",
+]
+
+
+def _trial_csv_row(rec: str, t: TrialResult) -> list:
+    return [
+        rec, t.trial, t.block, t.btrial, t.cond,
+        round(t.onset, 4), round(t.key, 4), t.rt_ms,
+        round(t.fz_ptp, 4), round(t.theta_fft, 4), round(t.beta_fft, 4),
+        round(t.maxz, 6), round(t.impact, 6), round(t.coinc, 6),
+        t.blink, t.fz_exclude, t.c3_exclude, t.reason,
+        round(t.theta_abs, 6), round(t.theta_rel, 6),
+        round(t.beta_abs, 6),  round(t.beta_rel, 6),
+    ]
 
 
 @app.get("/api/download-csv-trials/{result_id}")
-async def download_csv_trials(result_id: str):
-    """Download trial-level CSV for one subject (one row per trial)."""
+async def download_trials_csv(result_id: str):
+    """Per-trial CSV for one subject (results.csv format)."""
     if result_id not in _results:
-        raise HTTPException(404, "Result not found. Please upload a file first.")
-
+        raise HTTPException(404, "Result not found.")
     r = _results[result_id]
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
-        "subject", "recording_date", "trial", "block", "condition",
-        "theta_power", "beta_power",
-    ])
-    for p in r.power_results:
-        writer.writerow([
-            r.filename, r.recording_date,
-            p.trial_index + 1, p.block, p.condition,
-            round(float(p.ch1_theta_power), 6),
-            round(float(p.ch2_beta_power), 6),
-        ])
-
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={result_id}_trials.csv"},
-    )
+    rows = [_trial_csv_row(r.filename, t) for t in r.trials]
+    return _csv_response(rows, TRIAL_CSV_HEADER, f"{result_id}_results.csv")
 
 
 @app.get("/api/download-csv-trials-all")
-async def download_csv_trials_all():
-    """Download trial-level CSV for all subjects (one row per trial per subject).
-    Ideal for SPSS — single table, sortable by subject, block, and condition."""
+async def download_trials_csv_all():
+    """Combined per-trial CSV across all uploaded subjects."""
     if not _results:
-        raise HTTPException(404, "No results. Upload files first.")
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
-        "subject", "recording_date", "trial", "block", "condition",
-        "theta_power", "beta_power",
-    ])
+        raise HTTPException(404, "No results.")
+    rows = []
     for r in _results.values():
-        for p in r.power_results:
-            writer.writerow([
-                r.filename, r.recording_date,
-                p.trial_index + 1, p.block, p.condition,
-                round(float(p.ch1_theta_power), 6),
-                round(float(p.ch2_beta_power), 6),
-            ])
-
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=eeg_group_trials.csv"},
-    )
+        rows.extend(_trial_csv_row(r.filename, t) for t in r.trials)
+    return _csv_response(rows, TRIAL_CSV_HEADER, "eeg_group_results.csv")
 
 
-# Serve frontend
+EXCL_HEADER = ["recording", "trial", "block", "btrial", "cond", "rt_ms",
+               "fz_exclude", "c3_exclude", "reason"]
+
+
+@app.get("/api/download-csv-exclusions/{result_id}")
+async def download_exclusions_csv(result_id: str):
+    """Exclusion log for one subject."""
+    if result_id not in _results:
+        raise HTTPException(404, "Result not found.")
+    r = _results[result_id]
+    rows = [
+        [r.filename, t.trial, t.block, t.btrial, t.cond, t.rt_ms,
+         t.fz_exclude, t.c3_exclude, t.reason]
+        for t in r.trials if t.fz_exclude or t.c3_exclude
+    ]
+    return _csv_response(rows, EXCL_HEADER, f"{result_id}_exclusions.csv")
+
+
+SUMMARY_HEADER = [
+    "recording", "recording_date",
+    "theta_surviving", "theta_excluded",
+    "theta_rel_median_con", "theta_rel_median_inc",
+    "theta_abs_median_con", "theta_abs_median_inc",
+    "beta_surviving", "beta_excluded",
+    "beta_rel_median_con", "beta_rel_median_inc",
+    "beta_abs_median_con", "beta_abs_median_inc",
+    "theta_exclusion_pct_con", "theta_exclusion_pct_inc", "theta_balance_flag",
+    "beta_exclusion_pct_con",  "beta_exclusion_pct_inc",  "beta_balance_flag",
+]
+
+
+def _summary_row(r: PipelineResult) -> list:
+    ts, bs = r.theta_summary, r.beta_summary
+    return [
+        r.filename, r.recording_date,
+        ts.surviving, ts.excluded,
+        round(ts.rel_median_con, 6), round(ts.rel_median_inc, 6),
+        round(ts.abs_median_con, 6), round(ts.abs_median_inc, 6),
+        bs.surviving, bs.excluded,
+        round(bs.rel_median_con, 6), round(bs.rel_median_inc, 6),
+        round(bs.abs_median_con, 6), round(bs.abs_median_inc, 6),
+        round(ts.exclusion_pct_con, 2), round(ts.exclusion_pct_inc, 2), ts.balance_flag,
+        round(bs.exclusion_pct_con, 2), round(bs.exclusion_pct_inc, 2), bs.balance_flag,
+    ]
+
+
+@app.get("/api/download-csv/{result_id}")
+async def download_summary_csv(result_id: str):
+    """Single-subject summary CSV (medians + balance flags)."""
+    if result_id not in _results:
+        raise HTTPException(404, "Result not found.")
+    r = _results[result_id]
+    return _csv_response([_summary_row(r)], SUMMARY_HEADER, f"{result_id}_summary.csv")
+
+
+@app.get("/api/download-csv-all")
+async def download_summary_csv_all():
+    """Group summary CSV (one row per subject)."""
+    if not _results:
+        raise HTTPException(404, "No results.")
+    rows = [_summary_row(r) for r in _results.values()]
+    return _csv_response(rows, SUMMARY_HEADER, "eeg_group_summary.csv")
+
+
+# ============================================================
+#  Static frontend
+# ============================================================
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
