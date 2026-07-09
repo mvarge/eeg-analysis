@@ -713,6 +713,8 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Chart expand / collapse ──
+function stopPanelClick(e) { e.stopPropagation(); }
+
 function initChartExpand() {
     // Inject an "Expand" button into every chart panel header, and wire it up.
     // Works for both individual and compare screens because we run this once at
@@ -730,28 +732,40 @@ function enhanceChartPanels() {
         const h3 = panel.querySelector('h3');
         if (!h3) return;
 
+        // Ensure the header has a single action wrapper on the right
+        let actions = h3.querySelector('.chart-header-actions');
+        if (!actions) {
+            actions = document.createElement('span');
+            actions.className = 'chart-header-actions';
+            h3.appendChild(actions);
+        }
+
         // Avg / All trials toggle — only for the spectrum panels
         const container = panel.querySelector('.chart-container');
         const isSpectrum = container && (container.id === 'chart-spec-theta' || container.id === 'chart-spec-beta');
-        if (isSpectrum && !panel.querySelector('.chart-mode-btn')) {
+        if (isSpectrum && !actions.querySelector('.chart-mode-btn')) {
             panel.dataset.mode = panel.dataset.mode || 'avg';
             const toggle = document.createElement('button');
             toggle.className = 'chart-mode-btn';
             toggle.type = 'button';
-            toggle.textContent = 'All trials';
+            const paintToggle = () => {
+                const isAll = panel.dataset.mode === 'all';
+                toggle.textContent = isAll ? 'View: All trials' : 'View: Avg';
+                toggle.classList.toggle('active', isAll);
+            };
+            paintToggle();
             toggle.title = 'Switch between averaged and per-trial view';
             toggle.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const next = panel.dataset.mode === 'all' ? 'avg' : 'all';
-                panel.dataset.mode = next;
-                toggle.textContent = next === 'all' ? 'Avg' : 'All trials';
-                drawSpectrumChart(container.id, next);
+                panel.dataset.mode = panel.dataset.mode === 'all' ? 'avg' : 'all';
+                paintToggle();
+                drawSpectrumChart(container.id, panel.dataset.mode);
             });
-            h3.appendChild(toggle);
+            actions.appendChild(toggle);
         }
 
         // Expand button on every panel
-        if (!panel.querySelector('.chart-expand-btn')) {
+        if (!actions.querySelector('.chart-expand-btn')) {
             const btn = document.createElement('button');
             btn.className = 'chart-expand-btn';
             btn.type = 'button';
@@ -761,7 +775,7 @@ function enhanceChartPanels() {
                 e.stopPropagation();
                 toggleChartExpand(panel, btn);
             });
-            h3.appendChild(btn);
+            actions.appendChild(btn);
         }
     });
 }
@@ -770,15 +784,9 @@ function toggleChartExpand(panel, btn) {
     const expanded = panel.classList.toggle('expanded');
     btn.textContent = expanded ? '× Collapse' : '⤢ Expand';
 
-    // Backdrop
+    // Backdrop + body-scroll lock
     let backdrop = document.querySelector('.chart-backdrop');
     if (expanded) {
-        if (!backdrop) {
-            backdrop = document.createElement('div');
-            backdrop.className = 'chart-backdrop';
-            backdrop.addEventListener('click', () => collapseAllCharts());
-            document.body.appendChild(backdrop);
-        }
         // Collapse any other expanded panel first
         document.querySelectorAll('.chart-panel.expanded').forEach(p => {
             if (p !== panel) {
@@ -787,14 +795,30 @@ function toggleChartExpand(panel, btn) {
                 if (b) b.textContent = '⤢ Expand';
             }
         });
-    } else if (backdrop) {
-        backdrop.remove();
+        if (!backdrop) {
+            backdrop = document.createElement('div');
+            backdrop.className = 'chart-backdrop';
+            backdrop.addEventListener('click', () => collapseAllCharts());
+            document.body.appendChild(backdrop);
+        }
+        document.body.classList.add('chart-expanded-open');
+        // Stop clicks inside the expanded panel from bubbling to the backdrop
+        panel.addEventListener('click', stopPanelClick);
+    } else {
+        if (backdrop) backdrop.remove();
+        document.body.classList.remove('chart-expanded-open');
+        panel.removeEventListener('click', stopPanelClick);
     }
 
-    // Ask Plotly to resize the chart to fit the new container size
+    // Ask Plotly to resize after the CSS transition has settled. Two rAFs is
+    // the reliable way to wait for the browser to compute the new box.
     const container = panel.querySelector('.chart-container');
     if (container && window.Plotly) {
-        setTimeout(() => Plotly.Plots.resize(container), 50);
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                try { Plotly.Plots.resize(container); } catch (_) {}
+            });
+        });
     }
 }
 
@@ -805,9 +829,14 @@ function collapseAllCharts() {
         if (btn) btn.textContent = '⤢ Expand';
         const container = panel.querySelector('.chart-container');
         if (container && window.Plotly) {
-            setTimeout(() => Plotly.Plots.resize(container), 50);
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    try { Plotly.Plots.resize(container); } catch (_) {}
+                });
+            });
         }
     });
     const backdrop = document.querySelector('.chart-backdrop');
     if (backdrop) backdrop.remove();
+    document.body.classList.remove('chart-expanded-open');
 }

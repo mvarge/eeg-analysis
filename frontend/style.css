@@ -589,6 +589,40 @@ main {
     height: 320px;
 }
 
+/* Chart-panel header: title on the left, action buttons on the right */
+.chart-panel h3 .chart-header-actions {
+    display: inline-flex;
+    gap: 0.4rem;
+    align-items: center;
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
+.chart-mode-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: var(--radius-sm, 6px);
+    padding: 0.15rem 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    cursor: pointer;
+    line-height: 1;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.chart-mode-btn:hover {
+    color: var(--text);
+    border-color: var(--accent, #5eead4);
+    background: rgba(94, 234, 212, 0.06);
+}
+.chart-mode-btn.active {
+    color: var(--accent, #5eead4);
+    border-color: var(--accent, #5eead4);
+    background: rgba(94, 234, 212, 0.08);
+}
+
 /* Expanded (fullscreen) chart panel */
 .chart-panel.expanded {
     position: fixed;
@@ -605,15 +639,26 @@ main {
     display: flex;
     flex-direction: column;
     animation: fadeUp 0.25s ease both;
+    overflow: hidden;
+    /* Neutralise flex-item constraints from parent grid */
+    grid-column: unset !important;
+    grid-row: unset !important;
 }
 .chart-panel.expanded h3 {
     font-size: 0.9rem;
     margin-bottom: 1rem;
+    flex-shrink: 0;
 }
 .chart-panel.expanded .chart-container {
-    flex: 1;
+    flex: 1 1 auto;
     height: auto !important;
     min-height: 0;
+    width: 100%;
+}
+
+/* When a chart is expanded, lock body scroll */
+body.chart-expanded-open {
+    overflow: hidden;
 }
 
 /* Backdrop when any chart is expanded */
