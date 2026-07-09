@@ -209,9 +209,11 @@ function showResults(data) {
     // Charts
     renderSpectrumChart('chart-spec-theta', data.spectra.freqs,
         data.spectra.theta_congruent, data.spectra.theta_incongruent,
+        data.spectra.theta_excluded,
         'Wavelet power (µV²)', s.config.theta_band);
     renderSpectrumChart('chart-spec-beta', data.spectra.freqs,
         data.spectra.beta_congruent, data.spectra.beta_incongruent,
+        data.spectra.beta_excluded,
         'Wavelet power (µV²)', s.config.beta_band);
     renderPerTrialChart('chart-trials-theta', data.trials, 'theta_rel', 'fz_exclude', 'Trial θ relative power');
     renderPerTrialChart('chart-trials-beta',  data.trials, 'beta_rel',  'c3_exclude', 'Trial β relative power');
@@ -252,19 +254,26 @@ function setCard(prefix, band) {
 }
 
 // ── Wavelet spectrum chart ──
-function renderSpectrumChart(containerId, freqs, conData, incData, yLabel, bandRange) {
-    const traces = [
-        {
-            x: freqs, y: conData, name: 'Congruent', type: 'scatter', mode: 'lines',
-            line: { color: CON_COLOR, width: 1.6 },
-            fill: 'tozeroy', fillcolor: CON_COLOR_DIM,
-        },
-        {
-            x: freqs, y: incData, name: 'Incongruent', type: 'scatter', mode: 'lines',
-            line: { color: INC_COLOR, width: 1.6 },
-            fill: 'tozeroy', fillcolor: INC_COLOR_DIM,
-        },
-    ];
+function renderSpectrumChart(containerId, freqs, conData, incData, excData, yLabel, bandRange) {
+    const traces = [];
+    // Excluded (dimmed, drawn first so it sits behind)
+    if (excData && excData.some(v => v > 0)) {
+        traces.push({
+            x: freqs, y: excData, name: 'Excluded (avg)',
+            type: 'scatter', mode: 'lines',
+            line: { color: DIM_COLOR, width: 1.2, dash: 'dot' },
+        });
+    }
+    traces.push({
+        x: freqs, y: conData, name: 'Congruent', type: 'scatter', mode: 'lines',
+        line: { color: CON_COLOR, width: 1.6 },
+        fill: 'tozeroy', fillcolor: CON_COLOR_DIM,
+    });
+    traces.push({
+        x: freqs, y: incData, name: 'Incongruent', type: 'scatter', mode: 'lines',
+        line: { color: INC_COLOR, width: 1.6 },
+        fill: 'tozeroy', fillcolor: INC_COLOR_DIM,
+    });
     const layout = {
         ...plotlyLayout,
         xaxis: { ...plotlyLayout.xaxis, title: { text: 'Frequency (Hz)', font: { size: 10 } }, range: [1, 40] },
@@ -374,10 +383,15 @@ function populateExcludedTable(trials) {
     section.hidden = false;
     countEl.textContent = `(${excluded.length})`;
 
-    tbody.innerHTML = excluded.map(t => `
+    tbody.innerHTML = excluded.map(t => {
+        const mm = Math.floor(t.onset / 60);
+        const ss = (t.onset - mm * 60).toFixed(2).padStart(5, '0');
+        const onsetLabel = `${mm}:${ss}`;
+        return `
         <tr>
             <td>${t.trial}</td>
             <td>${t.block}</td>
+            <td title="${t.onset.toFixed(3)} s">${onsetLabel}</td>
             <td>${t.condition}</td>
             <td>${t.rt_ms} ms</td>
             <td>${t.fz_ptp.toFixed(1)} µV</td>
@@ -387,8 +401,8 @@ function populateExcludedTable(trials) {
             <td class="${t.fz_exclude ? 'flag-yes' : 'flag-no'}">${t.fz_exclude ? '✕' : '·'}</td>
             <td class="${t.c3_exclude ? 'flag-yes' : 'flag-no'}">${t.c3_exclude ? '✕' : '·'}</td>
             <td>${t.reason}</td>
-        </tr>
-    `).join('');
+        </tr>`;
+    }).join('');
 }
 
 // ── Subject list ──
@@ -611,4 +625,82 @@ document.addEventListener('DOMContentLoaded', () => {
     initBgWave();
     initUpload();
     initActions();
+    initChartExpand();
 });
+
+// ── Chart expand / collapse ──
+function initChartExpand() {
+    // Inject an "Expand" button into every chart panel header, and wire it up.
+    // Works for both individual and compare screens because we run this once at
+    // startup and again after each render pass (see enhanceChartPanels()).
+    enhanceChartPanels();
+
+    // Escape closes any expanded panel
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') collapseAllCharts();
+    });
+}
+
+function enhanceChartPanels() {
+    document.querySelectorAll('.chart-panel').forEach(panel => {
+        if (panel.querySelector('.chart-expand-btn')) return;   // already done
+        const h3 = panel.querySelector('h3');
+        if (!h3) return;
+        const btn = document.createElement('button');
+        btn.className = 'chart-expand-btn';
+        btn.type = 'button';
+        btn.textContent = '⤢ Expand';
+        btn.title = 'Expand chart (Esc to collapse)';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleChartExpand(panel, btn);
+        });
+        h3.appendChild(btn);
+    });
+}
+
+function toggleChartExpand(panel, btn) {
+    const expanded = panel.classList.toggle('expanded');
+    btn.textContent = expanded ? '× Collapse' : '⤢ Expand';
+
+    // Backdrop
+    let backdrop = document.querySelector('.chart-backdrop');
+    if (expanded) {
+        if (!backdrop) {
+            backdrop = document.createElement('div');
+            backdrop.className = 'chart-backdrop';
+            backdrop.addEventListener('click', () => collapseAllCharts());
+            document.body.appendChild(backdrop);
+        }
+        // Collapse any other expanded panel first
+        document.querySelectorAll('.chart-panel.expanded').forEach(p => {
+            if (p !== panel) {
+                p.classList.remove('expanded');
+                const b = p.querySelector('.chart-expand-btn');
+                if (b) b.textContent = '⤢ Expand';
+            }
+        });
+    } else if (backdrop) {
+        backdrop.remove();
+    }
+
+    // Ask Plotly to resize the chart to fit the new container size
+    const container = panel.querySelector('.chart-container');
+    if (container && window.Plotly) {
+        setTimeout(() => Plotly.Plots.resize(container), 50);
+    }
+}
+
+function collapseAllCharts() {
+    document.querySelectorAll('.chart-panel.expanded').forEach(panel => {
+        panel.classList.remove('expanded');
+        const btn = panel.querySelector('.chart-expand-btn');
+        if (btn) btn.textContent = '⤢ Expand';
+        const container = panel.querySelector('.chart-container');
+        if (container && window.Plotly) {
+            setTimeout(() => Plotly.Plots.resize(container), 50);
+        }
+    });
+    const backdrop = document.querySelector('.chart-backdrop');
+    if (backdrop) backdrop.remove();
+}

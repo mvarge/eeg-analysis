@@ -123,6 +123,9 @@ class PipelineResult:
     theta_spectrum_inc: np.ndarray
     beta_spectrum_con: np.ndarray          # mean |CWT|² across surviving con trials, C3
     beta_spectrum_inc: np.ndarray
+    # Averaged spectra across *excluded* trials (both conditions pooled)
+    theta_spectrum_excluded: np.ndarray
+    beta_spectrum_excluded: np.ndarray
 
 
 # ============================================================
@@ -328,6 +331,8 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
         theta_spectrum_inc=_mean_spec(theta_spec, keep_theta & inc_mask),
         beta_spectrum_con=_mean_spec(beta_spec,  keep_beta  & con_mask),
         beta_spectrum_inc=_mean_spec(beta_spec,  keep_beta  & inc_mask),
+        theta_spectrum_excluded=_mean_spec(theta_spec, (~keep_theta)),
+        beta_spectrum_excluded=_mean_spec(beta_spec,  (~keep_beta)),
     )
 
 

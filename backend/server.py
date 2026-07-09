@@ -152,6 +152,8 @@ def _spectra_payload(r: PipelineResult) -> dict:
         "theta_incongruent": r.theta_spectrum_inc.tolist(),
         "beta_congruent":    r.beta_spectrum_con.tolist(),
         "beta_incongruent":  r.beta_spectrum_inc.tolist(),
+        "theta_excluded":    r.theta_spectrum_excluded.tolist(),
+        "beta_excluded":     r.beta_spectrum_excluded.tolist(),
     }
 
 

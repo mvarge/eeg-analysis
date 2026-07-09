@@ -535,10 +535,35 @@ main {
     letter-spacing: 0.02em;
     margin-bottom: 0.8rem;
     text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
 }
 
 .chart-panel h3 span {
     color: var(--text);
+}
+
+.chart-expand-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: var(--radius-sm, 6px);
+    padding: 0.15rem 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    cursor: pointer;
+    line-height: 1;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    flex-shrink: 0;
+}
+.chart-expand-btn:hover {
+    color: var(--text);
+    border-color: var(--accent, #5eead4);
+    background: rgba(94, 234, 212, 0.06);
 }
 
 .chart-container {
@@ -548,6 +573,47 @@ main {
 
 .chart-panel.full-width .chart-container {
     height: 320px;
+}
+
+/* Expanded (fullscreen) chart panel */
+.chart-panel.expanded {
+    position: fixed;
+    top: 2vh;
+    left: 2vw;
+    width: 96vw;
+    height: 96vh;
+    z-index: 9999;
+    margin: 0;
+    padding: 1.5rem 2rem 2rem;
+    background: var(--bg-card);
+    border: 1px solid var(--accent, #5eead4);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    animation: fadeUp 0.25s ease both;
+}
+.chart-panel.expanded h3 {
+    font-size: 0.9rem;
+    margin-bottom: 1rem;
+}
+.chart-panel.expanded .chart-container {
+    flex: 1;
+    height: auto !important;
+    min-height: 0;
+}
+
+/* Backdrop when any chart is expanded */
+.chart-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    z-index: 9998;
+    animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
 }
 
 /* Buttons */
