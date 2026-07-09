@@ -126,6 +126,9 @@ class PipelineResult:
     # Averaged spectra across *excluded* trials (both conditions pooled)
     theta_spectrum_excluded: np.ndarray
     beta_spectrum_excluded: np.ndarray
+    # Per-trial spectra (n_trials × n_freqs) for the "all trials" toggle view
+    theta_spec_all: np.ndarray
+    beta_spec_all: np.ndarray
 
 
 # ============================================================
@@ -333,6 +336,8 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
         beta_spectrum_inc=_mean_spec(beta_spec,  keep_beta  & inc_mask),
         theta_spectrum_excluded=_mean_spec(theta_spec, (~keep_theta)),
         beta_spectrum_excluded=_mean_spec(beta_spec,  (~keep_beta)),
+        theta_spec_all=theta_spec,
+        beta_spec_all=beta_spec,
     )
 
 

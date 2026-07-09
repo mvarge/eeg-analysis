@@ -501,6 +501,20 @@ main {
     color: var(--text-dim);
 }
 
+/* Onset cell: mm:ss on top, raw seconds below in dimmer text */
+.excluded-table .onset-mm {
+    display: block;
+    line-height: 1.1;
+}
+.excluded-table .onset-raw {
+    display: block;
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    opacity: 0.75;
+    line-height: 1.1;
+    margin-top: 2px;
+}
+
 /* Charts grid */
 .charts-grid {
     display: grid;

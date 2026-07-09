@@ -207,14 +207,29 @@ function showResults(data) {
     setCard('beta', s.beta);
 
     // Charts
-    renderSpectrumChart('chart-spec-theta', data.spectra.freqs,
-        data.spectra.theta_congruent, data.spectra.theta_incongruent,
-        data.spectra.theta_excluded,
-        'Wavelet power (µV²)', s.config.theta_band);
-    renderSpectrumChart('chart-spec-beta', data.spectra.freqs,
-        data.spectra.beta_congruent, data.spectra.beta_incongruent,
-        data.spectra.beta_excluded,
-        'Wavelet power (µV²)', s.config.beta_band);
+    // Precompute per-trial condition + exclusion arrays (aligned to spectra rows)
+    const condPerTrial = data.trials.map(t => t.cond);
+    const fzExcludeArr = data.trials.map(t => t.fz_exclude);
+    const c3ExcludeArr = data.trials.map(t => t.c3_exclude);
+
+    renderSpectrumChart('chart-spec-theta', {
+        freqs: data.spectra.freqs,
+        conData: data.spectra.theta_congruent,
+        incData: data.spectra.theta_incongruent,
+        excData: data.spectra.theta_excluded,
+        perTrial: data.spectra.theta_per_trial,
+        exclusionFlags: fzExcludeArr,
+        condPerTrial,
+    }, 'Wavelet power (µV²)', s.config.theta_band);
+    renderSpectrumChart('chart-spec-beta', {
+        freqs: data.spectra.freqs,
+        conData: data.spectra.beta_congruent,
+        incData: data.spectra.beta_incongruent,
+        excData: data.spectra.beta_excluded,
+        perTrial: data.spectra.beta_per_trial,
+        exclusionFlags: c3ExcludeArr,
+        condPerTrial,
+    }, 'Wavelet power (µV²)', s.config.beta_band);
     renderPerTrialChart('chart-trials-theta', data.trials, 'theta_rel', 'fz_exclude', 'Trial θ relative power');
     renderPerTrialChart('chart-trials-beta',  data.trials, 'beta_rel',  'c3_exclude', 'Trial β relative power');
     renderExclusionChart('chart-exclusion', data.trials, s.theta.channel, s.beta.channel);
@@ -254,31 +269,99 @@ function setCard(prefix, band) {
 }
 
 // ── Wavelet spectrum chart ──
-function renderSpectrumChart(containerId, freqs, conData, incData, excData, yLabel, bandRange) {
+// Builds two views (Avg and All-trials) and stores the data on the container
+// so the header toggle can switch between them without a re-fetch.
+function renderSpectrumChart(containerId, spectrumData, yLabel, bandRange) {
+    const el = document.getElementById(containerId);
+    el.__spectrum = { ...spectrumData, yLabel, bandRange };
+
+    // Default mode: whatever the panel had before, else 'avg'
+    const panel = el.closest('.chart-panel');
+    const currentMode = (panel && panel.dataset.mode) || 'avg';
+    drawSpectrumChart(containerId, currentMode);
+}
+
+function drawSpectrumChart(containerId, mode) {
+    const el = document.getElementById(containerId);
+    const data = el.__spectrum;
+    if (!data) return;
+    const { freqs, conData, incData, excData,
+            perTrial, exclusionFlags, condPerTrial,
+            yLabel, bandRange } = data;
+
     const traces = [];
-    // Excluded (dimmed, drawn first so it sits behind)
-    if (excData && excData.some(v => v > 0)) {
+    if (mode === 'all' && perTrial && perTrial.length) {
+        // Excluded first (dimmed, behind)
+        for (let i = 0; i < perTrial.length; i++) {
+            if (!exclusionFlags[i]) continue;
+            traces.push({
+                x: freqs, y: perTrial[i],
+                type: 'scatter', mode: 'lines',
+                line: { color: DIM_COLOR, width: 1 },
+                opacity: 0.35,
+                hoverinfo: 'skip',
+                showlegend: false,
+            });
+        }
+        // Surviving con/inc trials on top
+        let sawCon = false, sawInc = false;
+        for (let i = 0; i < perTrial.length; i++) {
+            if (exclusionFlags[i]) continue;
+            const isCon = condPerTrial[i] === 'con';
+            const color = isCon ? CON_COLOR : INC_COLOR;
+            const name  = isCon ? 'Congruent' : 'Incongruent';
+            const showLegend = isCon ? !sawCon : !sawInc;
+            if (isCon) sawCon = true; else sawInc = true;
+            traces.push({
+                x: freqs, y: perTrial[i],
+                type: 'scatter', mode: 'lines',
+                line: { color, width: 1 },
+                opacity: 0.18,
+                name, legendgroup: isCon ? 'con' : 'inc',
+                showlegend: showLegend,
+                hovertemplate: `<b>${name}</b> · trial ${i + 1}<br>%{x:.1f} Hz → %{y:.2f}<extra></extra>`,
+            });
+        }
+        // Add a bold median line per condition on top for reference
         traces.push({
-            x: freqs, y: excData, name: 'Excluded (avg)',
+            x: freqs, y: conData, name: 'Congruent · avg', legendgroup: 'con-avg',
             type: 'scatter', mode: 'lines',
-            line: { color: DIM_COLOR, width: 1.2, dash: 'dot' },
+            line: { color: CON_COLOR, width: 2.2 },
+        });
+        traces.push({
+            x: freqs, y: incData, name: 'Incongruent · avg', legendgroup: 'inc-avg',
+            type: 'scatter', mode: 'lines',
+            line: { color: INC_COLOR, width: 2.2 },
+        });
+    } else {
+        // AVG mode (default)
+        if (excData && excData.some(v => v > 0)) {
+            traces.push({
+                x: freqs, y: excData, name: 'Excluded (avg)',
+                type: 'scatter', mode: 'lines',
+                line: { color: DIM_COLOR, width: 1.2, dash: 'dot' },
+            });
+        }
+        traces.push({
+            x: freqs, y: conData, name: 'Congruent',
+            type: 'scatter', mode: 'lines',
+            line: { color: CON_COLOR, width: 1.6 },
+            fill: 'tozeroy', fillcolor: CON_COLOR_DIM,
+        });
+        traces.push({
+            x: freqs, y: incData, name: 'Incongruent',
+            type: 'scatter', mode: 'lines',
+            line: { color: INC_COLOR, width: 1.6 },
+            fill: 'tozeroy', fillcolor: INC_COLOR_DIM,
         });
     }
-    traces.push({
-        x: freqs, y: conData, name: 'Congruent', type: 'scatter', mode: 'lines',
-        line: { color: CON_COLOR, width: 1.6 },
-        fill: 'tozeroy', fillcolor: CON_COLOR_DIM,
-    });
-    traces.push({
-        x: freqs, y: incData, name: 'Incongruent', type: 'scatter', mode: 'lines',
-        line: { color: INC_COLOR, width: 1.6 },
-        fill: 'tozeroy', fillcolor: INC_COLOR_DIM,
-    });
+
     const layout = {
         ...plotlyLayout,
         xaxis: { ...plotlyLayout.xaxis, title: { text: 'Frequency (Hz)', font: { size: 10 } }, range: [1, 40] },
         yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
-        hovermode: 'x unified',
+        hovermode: mode === 'all' ? 'closest' : 'x unified',
+        showlegend: true,
         shapes: [{
             type: 'rect',
             x0: bandRange[0], x1: bandRange[1],
@@ -387,11 +470,12 @@ function populateExcludedTable(trials) {
         const mm = Math.floor(t.onset / 60);
         const ss = (t.onset - mm * 60).toFixed(2).padStart(5, '0');
         const onsetLabel = `${mm}:${ss}`;
+        const onsetRaw = t.onset.toFixed(4);
         return `
         <tr>
             <td>${t.trial}</td>
             <td>${t.block}</td>
-            <td title="${t.onset.toFixed(3)} s">${onsetLabel}</td>
+            <td title="Raw seconds from LabChart file: ${onsetRaw}"><span class="onset-mm">${onsetLabel}</span><span class="onset-raw">${onsetRaw}s</span></td>
             <td>${t.condition}</td>
             <td>${t.rt_ms} ms</td>
             <td>${t.fz_ptp.toFixed(1)} µV</td>
@@ -643,19 +727,42 @@ function initChartExpand() {
 
 function enhanceChartPanels() {
     document.querySelectorAll('.chart-panel').forEach(panel => {
-        if (panel.querySelector('.chart-expand-btn')) return;   // already done
         const h3 = panel.querySelector('h3');
         if (!h3) return;
-        const btn = document.createElement('button');
-        btn.className = 'chart-expand-btn';
-        btn.type = 'button';
-        btn.textContent = '⤢ Expand';
-        btn.title = 'Expand chart (Esc to collapse)';
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleChartExpand(panel, btn);
-        });
-        h3.appendChild(btn);
+
+        // Avg / All trials toggle — only for the spectrum panels
+        const container = panel.querySelector('.chart-container');
+        const isSpectrum = container && (container.id === 'chart-spec-theta' || container.id === 'chart-spec-beta');
+        if (isSpectrum && !panel.querySelector('.chart-mode-btn')) {
+            panel.dataset.mode = panel.dataset.mode || 'avg';
+            const toggle = document.createElement('button');
+            toggle.className = 'chart-mode-btn';
+            toggle.type = 'button';
+            toggle.textContent = 'All trials';
+            toggle.title = 'Switch between averaged and per-trial view';
+            toggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const next = panel.dataset.mode === 'all' ? 'avg' : 'all';
+                panel.dataset.mode = next;
+                toggle.textContent = next === 'all' ? 'Avg' : 'All trials';
+                drawSpectrumChart(container.id, next);
+            });
+            h3.appendChild(toggle);
+        }
+
+        // Expand button on every panel
+        if (!panel.querySelector('.chart-expand-btn')) {
+            const btn = document.createElement('button');
+            btn.className = 'chart-expand-btn';
+            btn.type = 'button';
+            btn.textContent = '⤢ Expand';
+            btn.title = 'Expand chart (Esc to collapse)';
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleChartExpand(panel, btn);
+            });
+            h3.appendChild(btn);
+        }
     });
 }
 

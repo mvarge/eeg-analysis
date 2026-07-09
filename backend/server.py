@@ -124,7 +124,7 @@ def _trial_row(t: TrialResult) -> dict:
         "block": t.block,
         "cond": t.cond,
         "condition": _condition_label(t.cond),
-        "onset": round(t.onset, 3),
+        "onset": round(t.onset, 4),
         "key": round(t.key, 3),
         "rt_ms": t.rt_ms,
         "fz_ptp": round(t.fz_ptp, 2),
@@ -146,6 +146,10 @@ def _trial_row(t: TrialResult) -> dict:
 
 def _spectra_payload(r: PipelineResult) -> dict:
     """Wavelet spectra (averaged across surviving trials) for plotting."""
+    # Per-trial spectra rounded to 4 decimals to keep the JSON small.
+    def round_matrix(arr):
+        return [[round(float(v), 4) for v in row] for row in arr]
+
     return {
         "freqs": r.spectrum_freqs.tolist(),
         "theta_congruent":   r.theta_spectrum_con.tolist(),
@@ -154,6 +158,9 @@ def _spectra_payload(r: PipelineResult) -> dict:
         "beta_incongruent":  r.beta_spectrum_inc.tolist(),
         "theta_excluded":    r.theta_spectrum_excluded.tolist(),
         "beta_excluded":     r.beta_spectrum_excluded.tolist(),
+        # Per-trial spectra so the frontend can toggle Avg / All views
+        "theta_per_trial":   round_matrix(r.theta_spec_all),
+        "beta_per_trial":    round_matrix(r.beta_spec_all),
     }
 
 
