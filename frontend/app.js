@@ -23,11 +23,23 @@ const plotlyLayout = {
         gridcolor: 'rgba(30,35,48,0.8)',
         zerolinecolor: 'rgba(94,234,212,0.2)',
         tickfont: { size: 10 },
+        showspikes: true,
+        spikemode: 'across',
+        spikesnap: 'cursor',
+        spikecolor: 'rgba(94,234,212,0.55)',
+        spikethickness: 1,
+        spikedash: 'dot',
     },
     yaxis: {
         gridcolor: 'rgba(30,35,48,0.8)',
         zerolinecolor: 'rgba(94,234,212,0.2)',
         tickfont: { size: 10 },
+        showspikes: true,
+        spikemode: 'across',
+        spikesnap: 'cursor',
+        spikecolor: 'rgba(94,234,212,0.55)',
+        spikethickness: 1,
+        spikedash: 'dot',
     },
     legend: {
         bgcolor: 'rgba(0,0,0,0)',
@@ -42,6 +54,8 @@ const plotlyLayout = {
         font: { family: 'JetBrains Mono', size: 11, color: '#d8dce6' },
     },
     hovermode: 'closest',
+    hoverdistance: 50,
+    spikedistance: -1,
 };
 const plotlyConfig = { displayModeBar: false, responsive: true };
 
@@ -255,6 +269,7 @@ function renderSpectrumChart(containerId, freqs, conData, incData, yLabel, bandR
         ...plotlyLayout,
         xaxis: { ...plotlyLayout.xaxis, title: { text: 'Frequency (Hz)', font: { size: 10 } }, range: [1, 40] },
         yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
+        hovermode: 'x unified',
         shapes: [{
             type: 'rect',
             x0: bandRange[0], x1: bandRange[1],
