@@ -111,7 +111,18 @@ main {
 }
 
 .section {
-    animation: fadeUp 0.6s ease both;
+    /* Opacity-only fade: an animated `transform` (even translateY(0) at the
+     * final keyframe) turns the section into a containing block for its
+     * `position: fixed` descendants (e.g. .chart-panel.expanded), which then
+     * anchors to the section instead of the viewport. Keep the eased fade
+     * without a residual transform. Child elements are free to animate with
+     * their own fadeUp. */
+    animation: fadeInSection 0.6s ease both;
+}
+
+@keyframes fadeInSection {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 @keyframes fadeUp {

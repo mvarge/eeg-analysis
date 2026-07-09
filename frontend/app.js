@@ -955,6 +955,50 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Chart expand / collapse ──
+// Set DEBUG_EXPAND=true to trace the expand/collapse path in the console.
+const DEBUG_EXPAND = false;
+function logExpand(...args) {
+    if (DEBUG_EXPAND) console.log('[expand]', ...args);
+}
+function snapshotPanel(panel, label) {
+    if (!DEBUG_EXPAND) return;
+    const container = panel.querySelector('.chart-container');
+    const pRect = panel.getBoundingClientRect();
+    const cRect = container ? container.getBoundingClientRect() : null;
+    const cs = getComputedStyle(panel);
+    const csC = container ? getComputedStyle(container) : null;
+    const ancestors = [];
+    let node = panel.parentElement;
+    while (node && node !== document.body) {
+        const a = getComputedStyle(node);
+        if (a.transform !== 'none' || a.filter !== 'none' || a.perspective !== 'none' ||
+            a.willChange !== 'auto' || a.contain !== 'none' || a.overflow !== 'visible') {
+            ancestors.push({
+                tag: node.tagName.toLowerCase() + (node.id ? '#' + node.id : '') +
+                     (node.className ? '.' + String(node.className).split(' ').join('.') : ''),
+                transform: a.transform, filter: a.filter, perspective: a.perspective,
+                willChange: a.willChange, contain: a.contain, overflow: a.overflow,
+            });
+        }
+        node = node.parentElement;
+    }
+    const tag = `[expand:${label}] ${panel.dataset.chartId || '?'}`;
+    console.log(`${tag}  class="${panel.className}"`);
+    console.log(`${tag}  panelRect  x=${pRect.x.toFixed(0)} y=${pRect.y.toFixed(0)} w=${pRect.width.toFixed(0)} h=${pRect.height.toFixed(0)}`);
+    if (cRect)
+        console.log(`${tag}  contRect   x=${cRect.x.toFixed(0)} y=${cRect.y.toFixed(0)} w=${cRect.width.toFixed(0)} h=${cRect.height.toFixed(0)}`);
+    console.log(`${tag}  panel css: position=${cs.position} z=${cs.zIndex} top=${cs.top} left=${cs.left} w=${cs.width} h=${cs.height} display=${cs.display}`);
+    if (csC)
+        console.log(`${tag}  cont  css: position=${csC.position} display=${csC.display} w=${csC.width} h=${csC.height} flex=${csC.flex}`);
+    console.log(`${tag}  viewport ${window.innerWidth}x${window.innerHeight}  scrollY=${window.scrollY}  body.chart-expanded-open=${document.body.classList.contains('chart-expanded-open')}  backdrop=${!!document.querySelector('.chart-backdrop')}  #expanded=${document.querySelectorAll('.chart-panel.expanded').length}`);
+    if (ancestors.length) {
+        console.warn(`${tag}  positioned/clipping ancestors (may trap position:fixed): ${ancestors.length}`);
+        ancestors.forEach((a, i) => {
+            console.warn(`${tag}    [${i}] ${a.tag}  transform=${a.transform}  filter=${a.filter}  perspective=${a.perspective}  willChange=${a.willChange}  contain=${a.contain}  overflow=${a.overflow}`);
+        });
+    }
+}
+
 function stopPanelClick(e) { e.stopPropagation(); }
 
 function initChartExpand() {
@@ -965,14 +1009,25 @@ function initChartExpand() {
 
     // Escape closes any expanded panel
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') collapseAllCharts();
+        if (e.key === 'Escape') {
+            logExpand('keydown Escape → collapseAllCharts()');
+            collapseAllCharts();
+        }
     });
+    logExpand('initChartExpand() done. panels enhanced:',
+        document.querySelectorAll('.chart-panel').length);
 }
 
 function enhanceChartPanels() {
     document.querySelectorAll('.chart-panel').forEach(panel => {
         const h3 = panel.querySelector('h3');
         if (!h3) return;
+
+        // Give each panel a stable id for logging
+        if (!panel.dataset.chartId) {
+            const c = panel.querySelector('.chart-container');
+            panel.dataset.chartId = (c && c.id) || h3.textContent.trim().slice(0, 40);
+        }
 
         // Ensure the header has a single action wrapper on the right
         let actions = h3.querySelector('.chart-header-actions');
@@ -1015,6 +1070,7 @@ function enhanceChartPanels() {
             btn.title = 'Expand chart (Esc to collapse)';
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
+                logExpand('button clicked on', panel.dataset.chartId, 'currently expanded?', panel.classList.contains('expanded'));
                 toggleChartExpand(panel, btn);
             });
             actions.appendChild(btn);
@@ -1023,8 +1079,39 @@ function enhanceChartPanels() {
 }
 
 function toggleChartExpand(panel, btn) {
+    const id = panel.dataset.chartId || '?';
+    logExpand('toggleChartExpand →', id, '(before)');
+    snapshotPanel(panel, 'before toggle');
+
+    const willExpand = !panel.classList.contains('expanded');
+
+    // ── Portal-in / portal-out ──
+    // Ancestors with `animation: fadeUp` keep a `transform` after the animation
+    // finishes (fill-mode both), which makes them the containing block for any
+    // `position: fixed` descendant. The panel then anchors to that ancestor
+    // instead of the viewport and can render off-screen if the page is scrolled.
+    // Fix: when expanding, move the panel out to <body>; when collapsing,
+    // put it back where it was.
+    if (willExpand) {
+        if (!panel.dataset.portalHome) {
+            const parent = panel.parentElement;
+            const next = panel.nextElementSibling;
+            // Insert a placeholder so we can restore the exact original spot
+            const placeholder = document.createElement('div');
+            placeholder.className = 'chart-panel-placeholder';
+            placeholder.style.display = 'none';
+            placeholder.dataset.portalFor = id;
+            parent.insertBefore(placeholder, panel);
+            panel.dataset.portalHome = '1';
+            panel._portalPlaceholder = placeholder;
+            document.body.appendChild(panel);
+            logExpand('portaled panel to <body>. placeholder inserted in', parent.tagName.toLowerCase() + (parent.id ? '#' + parent.id : ''));
+        }
+    }
+
     const expanded = panel.classList.toggle('expanded');
     btn.textContent = expanded ? '× Collapse' : '⤢ Expand';
+    logExpand('classList.toggle("expanded") →', expanded, 'on', id);
 
     // Backdrop + body-scroll lock
     let backdrop = document.querySelector('.chart-backdrop');
@@ -1032,25 +1119,37 @@ function toggleChartExpand(panel, btn) {
         // Collapse any other expanded panel first
         document.querySelectorAll('.chart-panel.expanded').forEach(p => {
             if (p !== panel) {
+                logExpand('collapsing sibling', p.dataset.chartId);
                 p.classList.remove('expanded');
                 const b = p.querySelector('.chart-expand-btn');
                 if (b) b.textContent = '⤢ Expand';
+                restorePanelFromPortal(p);
             }
         });
         if (!backdrop) {
+            logExpand('creating backdrop');
             backdrop = document.createElement('div');
             backdrop.className = 'chart-backdrop';
-            backdrop.addEventListener('click', () => collapseAllCharts());
+            backdrop.addEventListener('click', () => {
+                logExpand('backdrop clicked → collapseAllCharts()');
+                collapseAllCharts();
+            });
             document.body.appendChild(backdrop);
         }
         document.body.classList.add('chart-expanded-open');
-        // Stop clicks inside the expanded panel from bubbling to the backdrop
         panel.addEventListener('click', stopPanelClick);
     } else {
-        if (backdrop) backdrop.remove();
+        if (backdrop) {
+            logExpand('removing backdrop');
+            backdrop.remove();
+        }
         document.body.classList.remove('chart-expanded-open');
         panel.removeEventListener('click', stopPanelClick);
+        restorePanelFromPortal(panel);
     }
+
+    // Snapshot right after class toggle (before rAF resize)
+    snapshotPanel(panel, 'after class toggle');
 
     // Ask Plotly to resize after the CSS transition has settled. Two rAFs is
     // the reliable way to wait for the browser to compute the new box.
@@ -1058,17 +1157,42 @@ function toggleChartExpand(panel, btn) {
     if (container && window.Plotly) {
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                try { Plotly.Plots.resize(container); } catch (_) {}
+                try {
+                    logExpand('Plotly.Plots.resize(', container.id || '(no id)', ')');
+                    Plotly.Plots.resize(container);
+                    snapshotPanel(panel, 'after Plotly.resize');
+                } catch (err) {
+                    console.error('[expand] Plotly.resize error', err);
+                }
             });
         });
+    } else {
+        logExpand('no Plotly or no container — skipping resize');
     }
 }
 
+function restorePanelFromPortal(panel) {
+    if (!panel.dataset.portalHome) return;
+    const placeholder = panel._portalPlaceholder;
+    if (placeholder && placeholder.parentNode) {
+        placeholder.parentNode.insertBefore(panel, placeholder);
+        placeholder.remove();
+        logExpand('restored panel', panel.dataset.chartId, 'to original DOM position');
+    } else {
+        console.warn('[expand] cannot restore panel — placeholder missing', panel.dataset.chartId);
+    }
+    delete panel.dataset.portalHome;
+    delete panel._portalPlaceholder;
+}
+
 function collapseAllCharts() {
-    document.querySelectorAll('.chart-panel.expanded').forEach(panel => {
+    const expanded = document.querySelectorAll('.chart-panel.expanded');
+    logExpand('collapseAllCharts() → count =', expanded.length);
+    expanded.forEach(panel => {
         panel.classList.remove('expanded');
         const btn = panel.querySelector('.chart-expand-btn');
         if (btn) btn.textContent = '⤢ Expand';
+        restorePanelFromPortal(panel);
         const container = panel.querySelector('.chart-container');
         if (container && window.Plotly) {
             requestAnimationFrame(() => {
