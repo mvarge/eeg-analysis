@@ -5,7 +5,12 @@
 # If you get an execution policy error, run once:
 #   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 
-$ErrorActionPreference = "Stop"
+# Don't treat stderr output from native commands (like python) as a
+# terminating error. Python writes tracebacks to stderr for normal control
+# flow (e.g. checking whether a module is importable), and PowerShell would
+# otherwise abort the script.
+$ErrorActionPreference = "Continue"
+$PSNativeCommandUseErrorActionPreference = $false
 
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendDir = Join-Path $ScriptDir "backend"
@@ -33,8 +38,9 @@ if (-not (Test-Path $VenvDir)) {
 # Activate venv
 & (Join-Path $VenvDir "Scripts\Activate.ps1")
 
-# Install dependencies if needed
-python -c "import fastapi" 2>$null
+# Install dependencies if needed. We redirect BOTH stdout and stderr to $null
+# so PowerShell doesn't surface Python's ModuleNotFoundError traceback.
+$null = & python -c "import fastapi" 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Host "-> Installing dependencies (first run only)..."
     pip install -q -r (Join-Path $BackendDir "requirements.txt")
