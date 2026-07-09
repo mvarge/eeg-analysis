@@ -630,7 +630,7 @@ main {
     left: 2vw;
     width: 96vw;
     height: 96vh;
-    z-index: 9999;
+    z-index: 10000;
     margin: 0;
     padding: 1.5rem 2rem 2rem;
     background: var(--bg-card);
@@ -665,8 +665,7 @@ body.chart-expanded-open {
 .chart-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(4px);
+    background: rgba(0, 0, 0, 0.75);
     z-index: 9998;
     animation: fadeIn 0.2s ease;
 }
