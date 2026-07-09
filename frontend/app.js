@@ -365,8 +365,9 @@ function showResults(data) {
         exclusionFlags: c3ExcludeArr,
         condPerTrial,
     }, 'Wavelet power (µV²)', s.config.beta_band);
-    renderPerTrialChart('chart-trials-theta', data.trials, 'theta_rel', 'fz_exclude', 'Trial θ relative power');
-    renderPerTrialChart('chart-trials-beta',  data.trials, 'beta_rel',  'c3_exclude', 'Trial β relative power');
+    const blockOrder = (s.demographics && s.demographics.block_order) || {};
+    renderPerTrialChart('chart-trials-theta', data.trials, 'theta_rel', 'fz_exclude', 'Trial θ relative power', blockOrder);
+    renderPerTrialChart('chart-trials-beta',  data.trials, 'beta_rel',  'c3_exclude', 'Trial β relative power', blockOrder);
     renderExclusionChart('chart-exclusion', data.trials, s.theta.channel, s.beta.channel);
 
     // Excluded trials table
@@ -509,7 +510,7 @@ function drawSpectrumChart(containerId, mode) {
 }
 
 // ── Per-trial power scatter ──
-function renderPerTrialChart(containerId, trials, powerKey, excludeKey, yLabel) {
+function renderPerTrialChart(containerId, trials, powerKey, excludeKey, yLabel, blockOrder = {}) {
     // Split by condition × surviving/excluded → four traces
     function subset(cond, excluded) {
         return trials.filter(t => t.cond === cond && !!t[excludeKey] === excluded);
@@ -535,10 +536,43 @@ function renderPerTrialChart(containerId, trials, powerKey, excludeKey, yLabel) 
         trace(excInc,  'Incongruent (excluded)', DIM_COLOR, 0.6),
     ];
 
+    // Find first trial of block 2 (if any) to draw a divider
+    const shapes = [];
+    const annotations = [];
+    const block2First = trials.find(t => t.block === 2);
+    if (block2First) {
+        const xBoundary = block2First.trial - 0.5;
+        shapes.push({
+            type: 'line',
+            x0: xBoundary, x1: xBoundary,
+            y0: 0, y1: 1, yref: 'paper',
+            line: { color: 'rgba(255,255,255,0.35)', width: 1, dash: 'dash' },
+        });
+        if (blockOrder && (blockOrder['1'] || blockOrder['2'])) {
+            const midB1 = (trials.find(t => t.block === 1)?.trial ?? 1);
+            const lastB1 = [...trials].reverse().find(t => t.block === 1)?.trial ?? xBoundary;
+            const lastB2 = [...trials].reverse().find(t => t.block === 2)?.trial ?? block2First.trial;
+            annotations.push({
+                x: (midB1 + lastB1) / 2, y: 1, yref: 'paper',
+                text: `Block 1 · ${blockOrder['1'] || '?'}`,
+                showarrow: false, font: { size: 10, color: 'rgba(255,255,255,0.75)' },
+                yanchor: 'bottom',
+            });
+            annotations.push({
+                x: (block2First.trial + lastB2) / 2, y: 1, yref: 'paper',
+                text: `Block 2 · ${blockOrder['2'] || '?'}`,
+                showarrow: false, font: { size: 10, color: 'rgba(255,255,255,0.75)' },
+                yanchor: 'bottom',
+            });
+        }
+    }
+
     const layout = {
         ...plotlyLayout,
         xaxis: { ...plotlyLayout.xaxis, title: { text: 'Trial number', font: { size: 10 } } },
         yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
+        shapes,
+        annotations,
     };
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
 }
@@ -677,8 +711,14 @@ async function showComparison() {
         // Table
         const thead = document.querySelector('#compare-table thead');
         const tbody = document.querySelector('#compare-table tbody');
+        // Only show demographic columns if at least one subject has a match
+        const anyDemo = subjects.some(s => s.summary.demographics && s.summary.demographics.matched);
+        const demoCols = anyDemo
+            ? '<th>Age</th><th>Sex</th><th>Hand</th><th>Block order</th>'
+            : '';
         thead.innerHTML = `<tr>
             <th></th><th>Subject</th><th>Date</th>
+            ${demoCols}
             <th>θ rel con</th><th>θ rel inc</th><th>θ Δ</th>
             <th>β rel con</th><th>β rel inc</th>
             <th>θ surv</th><th>β surv</th>
@@ -689,10 +729,26 @@ async function showComparison() {
             const dcol = dTheta > 0 ? 'val-inc' : 'val-con';
             const balTh = s.theta.balance_flag ? ' ⚠' : '';
             const balBe = s.beta.balance_flag ? ' ⚠' : '';
+            let demoTds = '';
+            if (anyDemo) {
+                const d = s.demographics || {};
+                const findField = (key) => (d.fields || []).find(f => f.key === key)?.value || '';
+                const bo = d.block_order || {};
+                const blockOrder = (bo['1'] || bo['2'])
+                    ? `${bo['1'] || '?'} / ${bo['2'] || '?'}`
+                    : (d.aborted ? 'aborted' : '—');
+                demoTds = `
+                    <td>${escapeHtml(findField('age')) || '—'}</td>
+                    <td>${escapeHtml(findField('sex')) || '—'}</td>
+                    <td>${escapeHtml(findField('handedness')) || '—'}</td>
+                    <td>${escapeHtml(blockOrder)}</td>
+                `;
+            }
             return `<tr>
                 <td><span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]};display:inline-block;width:8px;height:8px;border-radius:50%"></span></td>
-                <td>${s.filename}</td>
-                <td>${s.recording_date}</td>
+                <td>${escapeHtml(s.filename)}</td>
+                <td>${escapeHtml(s.recording_date)}</td>
+                ${demoTds}
                 <td class="val-con">${s.theta.rel_median_con.toFixed(3)}</td>
                 <td class="val-inc">${s.theta.rel_median_inc.toFixed(3)}</td>
                 <td class="${dcol}">${dTheta >= 0 ? '+' : ''}${dTheta.toFixed(3)}</td>
