@@ -52,7 +52,21 @@ BLINK_UV      = 80              # Fz peak-to-peak (µV) — legacy full-band cut
 # 30-50 µV blinks on other recordings.
 BLINK_SLOW_HZ = 7.0            # low-pass (Hz) isolating the slow blink shape
 BLINK_K       = 10.0           # frozen MAD multiplier (see note above)
-EMG_BETA      = 150_000         # C3 beta power (µV²) in window
+EMG_BETA      = 150_000         # C3 beta power (µV²) — legacy fixed cutoff,
+                               # retained for reporting only. The EMG DECISION
+                               # now uses the adaptive rule below.
+# Adaptive EMG rejection (work-order Task 5). The old fixed 150 000 µV² cutoff
+# was tuned to S1P002 and sliced through the middle of a normal beta
+# distribution on higher-amplitude recordings (S2P003: 45 trials dropped).
+# Replace with median + EMG_K · (1.4826·MAD) of THIS recording's own C3 beta
+# power distribution — a robust (normalised-MAD) z-threshold on the recording's
+# own scale. Computed condition-blind: congruent and incongruent trials are
+# pooled when estimating the threshold, so rejection cannot bias the
+# 60-vs-165 contrast (hard rule 5). EMG_K is a single frozen constant applied
+# identically to every file (hard rule 1). EMG_K = 4.5 reproduces S1P002's
+# reference EMG set exactly (trials 81/82/83/128; ~4 rejections) and sits at
+# the sensitive edge of the 4.5-4.9 range that does so.
+EMG_K         = 4.5            # frozen normalised-MAD multiplier (see note)
 BURST_Z       = 3.6            # C3 max |z| in window .... AND ....
 BURST_IMPACT  = 15              # ... % change in beta when spike removed
 COINC_Z       = 3.0             # simultaneous z on BOTH channels
@@ -383,6 +397,25 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
     beta_tot = beta_spec.sum(axis=1)
     beta_rel = np.where(beta_tot > 0, beta_spec[:, BE_MASK].sum(axis=1) / beta_tot, 0.0)
 
+    # ---- Adaptive EMG threshold (work-order Task 5) -----------------------
+    # median + EMG_K · (1.4826·MAD) of THIS recording's own C3 beta-power
+    # distribution, pooled across conditions (condition-blind, hard rule 5).
+    # The scale is per-recording; EMG_K is frozen (hard rule 1).
+    beta_fft_all = np.array([m["beta_fft"] for m in metrics], dtype=float)
+    if beta_fft_all.size:
+        emg_median = float(np.median(beta_fft_all))
+        emg_mad = float(np.median(np.abs(beta_fft_all - emg_median)))
+        emg_thresh = emg_median + EMG_K * 1.4826 * emg_mad
+    else:
+        emg_median = emg_mad = 0.0
+        emg_thresh = EMG_BETA
+    logger.info(
+        "%s EMG (adaptive C3 beta): median=%.0f MAD=%.0f K=%.1f thr=%.0fµV² -> %d over threshold",
+        parsed.filename, emg_median, emg_mad, EMG_K, emg_thresh,
+        int((beta_fft_all > emg_thresh).sum()),
+    )
+    parsed.emg_threshold = emg_thresh
+
     # ---- Assemble per-trial results + exclusion decisions -----------------
     trial_results: List[TrialResult] = []
     for i, tm in enumerate(trials_meta):
@@ -394,15 +427,15 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
         impact = m["impact"]
 
         fz_exclude = blink or (coinc > COINC_Z)
-        c3_exclude = (beta_val > EMG_BETA) or (maxz > BURST_Z and impact > BURST_IMPACT) or (coinc > COINC_Z)
+        c3_exclude = (beta_val > emg_thresh) or (maxz > BURST_Z and impact > BURST_IMPACT) or (coinc > COINC_Z)
 
         reasons = []
         if blink:
             reasons.append(f"blink (Fz slow-band ptp>{blink_thresh:.0f}µV)")
         if coinc > COINC_Z:
             reasons.append(f"coincident transient (z={coinc:.1f})")
-        if beta_val > EMG_BETA:
-            reasons.append(f"gross EMG (beta={beta_val:,.0f})")
+        if beta_val > emg_thresh:
+            reasons.append(f"gross EMG (beta={beta_val:,.0f}>{emg_thresh:,.0f})")
         if maxz > BURST_Z and impact > BURST_IMPACT:
             reasons.append(f"C3 burst (z={maxz:.1f}, beta impact {impact:.0f}%)")
         reason = "; ".join(reasons)

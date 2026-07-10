@@ -166,6 +166,10 @@ class ParsedEEG:
     # median+K·MAD threshold that recording used.
     blink_slow_ptp: List[float] = field(default_factory=list)
     blink_threshold_uv: float = 0.0
+    # Adaptive-EMG threshold (work-order Task 5). Populated by run_pipeline;
+    # the median+K·MAD C3 beta-power cutoff (µV²) this recording used. Read by
+    # the S005 check (beta-share / EMG contamination).
+    emg_threshold: float = 0.0
 
     @property
     def n_segments(self) -> int:
