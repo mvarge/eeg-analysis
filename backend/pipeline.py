@@ -181,6 +181,28 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
     # ---- STAGE 3: high-pass ------------------------------------------------
     # MNE expects (n_channels, n_times) in Volts
     raw_data = np.stack([parsed.fz, parsed.c3]) * 1e-6
+
+    # NaN-safe filtering (work-order Task 1). The parser stores np.nan for
+    # samples LabChart wrote as "NaN" (amplifier saturation) and for the
+    # inter-segment gaps. If those NaN reach MNE's FIR high-pass they would
+    # smear across the whole recording via the filter kernel and silently
+    # poison every downstream epoch. So we:
+    #   1. remember exactly which samples were NaN in the raw arrays, and
+    #   2. zero them before filtering (a local, bounded edit),
+    # then later DROP any trial whose analysed window overlaps an
+    # originally-NaN sample. Zeroing is safe only because those trials never
+    # contribute to any metric — the drop happens before Stage 5.
+    nan_mask = ~np.isfinite(raw_data)          # (2, n_times) True where NaN/Inf
+    n_nan_samples = int(nan_mask.any(axis=0).sum())
+    if n_nan_samples:
+        logger.info(
+            "%s: %d sample(s) NaN/Inf in raw signal; zeroed for filtering, "
+            "trials overlapping them will be dropped (S002)",
+            parsed.filename, n_nan_samples,
+        )
+        raw_data = np.where(nan_mask, 0.0, raw_data)
+    bad_sample = nan_mask.any(axis=0)          # (n_times,) True if either channel NaN here
+
     info = mne.create_info(["Fz-Pz", "C3-C4"], fs, "eeg")
     raw = mne.io.RawArray(raw_data, info, verbose=False)
     raw_hp = raw.copy().filter(l_freq=HP_HZ, h_freq=None, verbose=False)
@@ -188,6 +210,38 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
     FZ = raw_hp.get_data(picks="Fz-Pz")[0] * 1e6   # back to µV
     C3 = raw_hp.get_data(picks="C3-C4")[0] * 1e6
     T_axis = raw_hp.times
+
+    # ---- STAGE 3b: drop trials whose analysed window overlaps NaN (S002) --
+    # Check window is onset .. onset + WIN_S + REACH_S (the 675 ms window the
+    # wavelet actually reaches into), scoped per trial — never the whole file
+    # (hard rule 3). A trial touching an originally-NaN sample is dropped here
+    # so NaN never enters any FFT/wavelet. Reasons are recorded on the parsed
+    # object for the S002 check to surface.
+    check_win_samples = int(round((WIN_S + REACH_S) * fs))
+    dropped_nan: List[dict] = []
+    kept_trials: List[Trial] = []
+    n_total = len(raw_data[0])
+    for t in trials_meta:
+        lo = t.onset_sample_concat
+        hi = min(lo + check_win_samples, n_total)
+        if lo < 0 or lo >= n_total or bad_sample[lo:hi].any():
+            dropped_nan.append({
+                "trial": t.trial, "block": t.block, "cond": t.cond,
+                "onset_sample": lo,
+            })
+            continue
+        kept_trials.append(t)
+    if dropped_nan:
+        logger.warning(
+            "%s: dropped %d trial(s) with NaN in analysed window (S002): %s",
+            parsed.filename, len(dropped_nan),
+            ", ".join(str(d["trial"]) for d in dropped_nan),
+        )
+    # Expose for the S002 validity check (does not mutate parsed.trials).
+    parsed.nan_dropped_trials = dropped_nan
+    trials_meta = kept_trials
+    if not trials_meta:
+        logger.error("%s: all trials dropped for NaN; no analysable data", parsed.filename)
 
     # ---- STAGE 4: build events + Epochs (window + padding) ----------------
     # NB: use the concatenated sample index (segment-aware), not `t.onset * fs`.

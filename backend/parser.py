@@ -152,6 +152,10 @@ class ParsedEEG:
     # committing to blocks). Used by the B-family validity checks to
     # detect ambiguous or split recordings.
     cluster_meta: List[dict] = field(default_factory=list)
+    # Trials dropped by the pipeline because their analysed window overlapped
+    # a NaN/Inf sample (work-order Task 1). Populated by run_pipeline; read by
+    # the S002 validity check. Each entry: {trial, block, cond, onset_sample}.
+    nan_dropped_trials: List[dict] = field(default_factory=list)
 
     @property
     def n_segments(self) -> int:

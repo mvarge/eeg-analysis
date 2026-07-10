@@ -270,6 +270,7 @@ def check_signal_scoped(parsed: ParsedEEG, result: PipelineResult) -> List[Check
     c3 = parsed.c3
     total_samples = len(fz)
 
+    n_nan_epochs = 0
     for t in parsed.trials:
         start = t.onset_sample_concat
         end = start + n_samples_epoch
@@ -285,9 +286,10 @@ def check_signal_scoped(parsed: ParsedEEG, result: PipelineResult) -> List[Check
         c3_ep = c3[start:end]
 
         if np.isnan(fz_ep).any() or np.isnan(c3_ep).any():
+            n_nan_epochs += 1
             checks.append(Check(
                 "S002", HALT,
-                f"Trial {t.trial}: NaN inside analysed epoch.",
+                f"Trial {t.trial}: NaN inside analysed epoch (dropped from analysis).",
                 {"trial": t.trial},
             ))
             continue  # a NaN halts further per-trial signal checks for this trial
@@ -305,6 +307,17 @@ def check_signal_scoped(parsed: ParsedEEG, result: PipelineResult) -> List[Check
                 f"Trial {t.trial}: epoch SD < {DEAD_ELECTRODE_SD_UV} µV — dead electrode?",
                 {"trial": t.trial},
             ))
+
+    # INFO-on-pass summary (docs §1.3): report the NaN-drop outcome even when
+    # clean, so the reader sees the check ran. Cross-check against what the
+    # pipeline actually dropped (parsed.nan_dropped_trials) — they should match.
+    n_pipeline_dropped = len(getattr(parsed, "nan_dropped_trials", []))
+    checks.append(Check(
+        "S000", INFO,
+        f"NaN-in-epoch scan: {n_nan_epochs} epoch(s) contain NaN; "
+        f"pipeline dropped {n_pipeline_dropped} trial(s) for NaN.",
+        {"nan_epochs": n_nan_epochs, "pipeline_dropped": n_pipeline_dropped},
+    ))
 
     return checks
 
