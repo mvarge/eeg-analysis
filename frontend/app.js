@@ -339,7 +339,8 @@ function escapeHtml(s) {
 
 // Render the alignment panel from a payload like data.alignment
 // (list of per-block objects). Passing null/[] hides the panel.
-function renderAlignmentPanel(alignment) {
+// `accuracy` is the parallel per-block accuracy summary; may be null.
+function renderAlignmentPanel(alignment, accuracy) {
     const panel = document.getElementById('alignment-panel');
     if (!panel) return;
     if (!alignment || !alignment.length) {
@@ -350,17 +351,28 @@ function renderAlignmentPanel(alignment) {
     const src = document.getElementById('alignment-source');
     if (src) src.textContent = `${alignment.length} block${alignment.length > 1 ? 's' : ''} aligned`;
 
+    // Index accuracy by block for O(1) lookup.
+    const accByBlock = new Map();
+    if (accuracy) for (const a of accuracy) accByBlock.set(a.block, a);
+
     const grid = document.getElementById('alignment-fields');
-    // Per-block cells; each block gets: matched, offset, r, congruency,
-    // + a coloured status pill based on the J-code gates (spec §7).
     grid.innerHTML = alignment.map(a => {
         const gates = alignmentGateStatus(a);
         const pillCls = `pill ${gates.severity}`;
+        const acc = accByBlock.get(a.block);
+        const accLine = acc
+            ? `<span>accuracy <b>${fmtPct(acc.accuracy)}</b>${acc.n_errors ? ` · <b>${acc.n_errors}</b> error${acc.n_errors > 1 ? 's' : ''}` : ''}${
+                acc.eeg_error_trials_dropped.theta || acc.eeg_error_trials_dropped.beta
+                    ? ` · would drop θ <b>${acc.eeg_error_trials_dropped.theta}</b> / β <b>${acc.eeg_error_trials_dropped.beta}</b> from surviving`
+                    : ''
+              }</span>`
+            : '';
         return `<div class="demo-field alignment-field">
             <span class="demo-field-label">Block ${a.block} <span class="${pillCls}">${gates.label}</span></span>
             <span class="demo-field-value alignment-value">
                 <span>matched <b>${a.matched}</b>${a.unmatched_eeg ? ` · ${a.unmatched_eeg} EEG missing` : ''}${a.unmatched_beh ? ` · ${a.unmatched_beh} behavioural missing` : ''}</span>
                 <span>offset <b>${fmtMs(a.eeg_offset_ms)}</b> · r <b>${fmtR(a.rt_correlation)}</b> · congruency <b>${fmtPct(a.congruency_agreement)}</b></span>
+                ${accLine}
                 ${gates.detail ? `<span class="alignment-detail">${escapeHtml(gates.detail)}</span>` : ''}
             </span>
         </div>`;
@@ -406,7 +418,7 @@ async function refreshAlignmentForCurrentSubject() {
         const resp = await fetch(`${API}/api/behavioural/${encodeURIComponent(currentResultId)}`);
         if (!resp.ok) return;
         const d = await resp.json();
-        renderAlignmentPanel(d.alignment);
+        renderAlignmentPanel(d.alignment, d.accuracy);
     } catch (_) { /* backend unreachable — leave panel hidden */ }
 }
 
@@ -462,7 +474,7 @@ function initBehaviouralUpload() {
                 // If this behavioural session is for the currently-displayed
                 // subject, refresh the alignment panel immediately.
                 if (currentResultId && data.subject_id === currentResultId) {
-                    renderAlignmentPanel(data.alignment);
+                    renderAlignmentPanel(data.alignment, data.accuracy);
                 }
             } catch (err) {
                 setBehaviouralStatus(`⚠ ${sid}: ${err.message || 'Upload failed'}`, false);
@@ -510,7 +522,7 @@ function showResults(data) {
     // Behavioural-alignment panel (only shown if an OpenSesame CSV has been
     // aligned to this subject's EEG). The upload endpoint returns alignment
     // on demand; results endpoint doesn't yet include it, so we pull it.
-    renderAlignmentPanel(data.alignment);
+    renderAlignmentPanel(data.alignment, data.accuracy);
     refreshAlignmentForCurrentSubject();
 
     // Theta card

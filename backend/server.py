@@ -311,6 +311,7 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
             "source_files": [p.original for _, p in ordered],
             "warnings": parsed.warnings,
             "alignment": [_alignment_payload(a) for a in alignment],
+            "accuracy": _accuracy_payload(result_id),
         }
 
     except HTTPException:
@@ -438,6 +439,88 @@ def _alignment_payload(res: AlignmentResult) -> dict:
     }
 
 
+def _accuracy_payload(subject_id: str) -> List[dict]:
+    """Per-block accuracy + error-trial counts, if behavioural alignment ran.
+
+    Returns [] when no alignment exists. Otherwise one entry per block:
+      - block, n_beh_trials, n_errors, accuracy
+      - matched_correct_con / matched_correct_inc / matched_error_con /
+        matched_error_inc among the aligned pairs
+      - eeg_surviving_after_error_exclusion:
+          survival counts on the ANALYSED EEG trials, after also dropping
+          any that matched a behavioural error trial (docs §4.3 says to
+          exclude these normally).
+    The primary EEG-only surviving counts are unaffected — this is an
+    auxiliary view.
+    """
+    if subject_id not in _results or subject_id not in _behavioural:
+        return []
+    if subject_id not in _alignment:
+        return []
+
+    result = _results[subject_id]
+    session = _behavioural[subject_id]
+    per_block: List[dict] = []
+
+    for align in _alignment[subject_id]:
+        blk = align.block
+        beh_block = [t for t in session.trials if t.block == blk]
+        eeg_block = [t for t in result.trials if t.block == blk]
+
+        # Overall behavioural accuracy for this block (all rows, matched or not).
+        n_beh = len(beh_block)
+        n_errors = sum(1 for t in beh_block if not t.correct)
+
+        # Restrict to the matched pairs and count correct/error per congruency.
+        matched_c_con = matched_c_inc = matched_e_con = matched_e_inc = 0
+        error_eeg_indices: List[int] = []  # positions in eeg_block that matched an error
+        for eeg_i, beh_i in align.matched_pairs:
+            bt = beh_block[beh_i]
+            if bt.correct:
+                if bt.congruent:
+                    matched_c_con += 1
+                else:
+                    matched_c_inc += 1
+            else:
+                if bt.congruent:
+                    matched_e_con += 1
+                else:
+                    matched_e_inc += 1
+                error_eeg_indices.append(eeg_i)
+
+        # Recompute surviving counts on Fz-Pz and C3-C4 excluding error trials.
+        # Use result.trials filtered to this block.
+        eeg_surv_after = {"theta": 0, "beta": 0}
+        eeg_excl_error = {"theta": 0, "beta": 0}
+        for i, t in enumerate(eeg_block):
+            is_error = i in error_eeg_indices
+            if not t.fz_exclude:
+                if is_error:
+                    eeg_excl_error["theta"] += 1
+                else:
+                    eeg_surv_after["theta"] += 1
+            if not t.c3_exclude:
+                if is_error:
+                    eeg_excl_error["beta"] += 1
+                else:
+                    eeg_surv_after["beta"] += 1
+
+        per_block.append({
+            "block": blk,
+            "n_beh_trials": n_beh,
+            "n_errors": n_errors,
+            "accuracy": (n_beh - n_errors) / n_beh if n_beh else float("nan"),
+            "matched_correct_con": matched_c_con,
+            "matched_correct_inc": matched_c_inc,
+            "matched_error_con": matched_e_con,
+            "matched_error_inc": matched_e_inc,
+            "eeg_surviving_after_error_exclusion": eeg_surv_after,
+            "eeg_error_trials_dropped": eeg_excl_error,
+        })
+
+    return per_block
+
+
 def _run_alignment(subject_id: str) -> List[AlignmentResult]:
     """Align the subject's EEG trials against its behavioural session.
 
@@ -541,6 +624,7 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
         "warnings": session.warnings,
         "eeg_loaded": subject_id in _results,
         "alignment": [_alignment_payload(a) for a in alignment],
+        "accuracy": _accuracy_payload(subject_id),
     }
 
 
@@ -558,6 +642,7 @@ async def get_behavioural(subject_id: str):
         "warnings": session.warnings,
         "eeg_loaded": subject_id in _results,
         "alignment": [_alignment_payload(a) for a in alignment],
+        "accuracy": _accuracy_payload(subject_id),
     }
 
 
