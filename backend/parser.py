@@ -156,6 +156,10 @@ class ParsedEEG:
     # a NaN/Inf sample (work-order Task 1). Populated by run_pipeline; read by
     # the S002 validity check. Each entry: {trial, block, cond, onset_sample}.
     nan_dropped_trials: List[dict] = field(default_factory=list)
+    # Block-selection B-codes (work-order Task 3). Populated by the server
+    # after select_blocks(); each entry is (code, level, message). Read by
+    # the checks payload so B000/B001/B002 surface in the validity panel.
+    block_codes: List[tuple] = field(default_factory=list)
 
     @property
     def n_segments(self) -> int:
@@ -600,33 +604,95 @@ def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[in
     if not markers:
         return [], []
 
-    # Cluster by global-time gap
+    def _is_end(m: Marker) -> bool:
+        return bool(END_TOKEN_RE.match(m.label)) or m.label.strip().lower() == "end"
+
+    # A `second` marker only *opens* a block if a real onset follows it
+    # SHORTLY (within BLOCK_GAP_S) before the next `second`/END. The marker
+    # convention is inconsistent between recordings:
+    #   * S1P002: `second` opens block 2 (a `con` onset follows ~0.7 s later),
+    #     plus a trailing `second` right before END that closes the block.
+    #   * S1P003/4/5: `second` CLOSES each block; the next onset is ~80 s away
+    #     across the inter-block gap, and block 2 opens with a plain onset.
+    # Requiring the following onset to be within BLOCK_GAP_S distinguishes an
+    # opening `second` (S1P002) from a closing one (S1P003) and from the
+    # trailing pre-END `second`, so neither produces a spurious candidate.
+    def _second_opens_block(idx: int) -> bool:
+        if markers[idx].label != BLOCK2_LABEL:
+            return False
+        t0 = markers[idx].time_global
+        for j in range(idx + 1, len(markers)):
+            nm = markers[j]
+            if nm.time_global - t0 > BLOCK_GAP_S:
+                return False
+            if nm.label in ONSET_LABELS:
+                return True
+            if nm.label == BLOCK2_LABEL or _is_end(nm):
+                return False
+        return False
+
+    # ── Clustering into CANDIDATE blocks (work-order Task 3) ──────────────
+    # A candidate block boundary is created by ANY of:
+    #   (1) a global-time gap > BLOCK_GAP_S (the original rule), OR
+    #   (2) a block-OPENING `second` marker — it explicitly starts a new
+    #       block, so it begins a new candidate even when < 30 s from the
+    #       previous run (the S3P006 case: an aborted block sits only ~3 s
+    #       after the valid first block and the gap rule alone merged them), OR
+    #   (3) the marker immediately AFTER an `END` — END closes an experiment
+    #       run; anything after it is a new (restart) candidate.
+    # Splitting on second/END rather than gaps alone is what lets an
+    # aborted/repeated run become its own candidate instead of being fused
+    # into a neighbour and inflating the trial count.
     clusters: List[List[Marker]] = [[]]
-    for m in markers:
-        if clusters[-1] and (m.time_global - clusters[-1][-1].time_global) > BLOCK_GAP_S:
+    prev: Optional[Marker] = None
+    for idx, m in enumerate(markers):
+        boundary = False
+        if clusters[-1]:
+            if (m.time_global - clusters[-1][-1].time_global) > BLOCK_GAP_S:
+                boundary = True          # (1) time gap
+            elif _second_opens_block(idx):
+                boundary = True          # (2) block-opening `second`
+            elif prev is not None and _is_end(prev):
+                boundary = True          # (3) first marker after END
+        if boundary:
             clusters.append([])
         clusters[-1].append(m)
+        prev = m
+    # Drop empty leading cluster if present
+    clusters = [c for c in clusters if c]
 
-    # Assign a block number to each cluster
-    def _cluster_has_second(cl: List[Marker]) -> bool:
-        return any(m.label == BLOCK2_LABEL for m in cl)
+    # Assign a candidate block number to each cluster.
+    #
+    # We cannot use "contains a `second`" as the block-2 signal, because in
+    # some recordings (S1P003/4/5) `second` CLOSES every block, so both
+    # clusters contain one. The reliable signal is a block-OPENING `second`
+    # (the S1P002 convention). Mark each cluster by whether it opens with one.
+    opener_idxs = {i for i in range(len(markers)) if _second_opens_block(i)}
+    _marker_id_to_idx = {id(m): i for i, m in enumerate(markers)}
 
-    if len(clusters) == 2:
+    def _cluster_opens_with_second(cl: List[Marker]) -> bool:
+        # True if this cluster's first onset is preceded by an opening
+        # `second` at the cluster head.
+        for m in cl:
+            if _marker_id_to_idx.get(id(m)) in opener_idxs:
+                return True
+            if m.label in ONSET_LABELS:
+                return False   # reached first onset without seeing an opener
+        return False
+
+    n_clusters = len(clusters)
+    if n_clusters == 2:
+        # The clean, unambiguous case: exactly two runs → blocks 1 and 2 in
+        # time order (works for both marker conventions).
         cluster_block = {id(clusters[0]): 1, id(clusters[1]): 2}
     else:
-        # For each cluster, block = 2 if it has a `second`, else 1.
-        # This may produce multiple block-1 or block-2 candidates on
-        # aborted/restarted files; later segment selection will pick one.
+        # Aborted/restarted files: a cluster is block 2 if it OPENS with a
+        # `second`, else block 1. This can yield MULTIPLE candidates for a
+        # block; selection (by behavioural alignment, or the trial-count
+        # fallback) runs downstream in select_blocks().
         cluster_block = {}
-        b1_idx = 0
-        b2_idx = 0
         for cl in clusters:
-            if _cluster_has_second(cl):
-                b2_idx += 1
-                cluster_block[id(cl)] = 2 if b2_idx == 1 else 2  # keep as 2; disambiguation later
-            else:
-                b1_idx += 1
-                cluster_block[id(cl)] = 1
+            cluster_block[id(cl)] = 2 if _cluster_opens_with_second(cl) else 1
 
     trials: List[Trial] = []
     trial_num = 0
@@ -690,8 +756,9 @@ def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[in
             "n_inc": n_inc_in_cluster,
             "t_start_global": cl[0].time_global if cl else 0.0,
             "t_end_global": cl[-1].time_global if cl else 0.0,
-            "has_second": _cluster_has_second(cl),
-            "has_end": any(END_TOKEN_RE.match(m.label) or m.label.strip().lower() == "end" for m in cl),
+            "has_second": any(m.label == BLOCK2_LABEL for m in cl),
+            "opens_with_second": _cluster_opens_with_second(cl),
+            "has_end": any(_is_end(m) for m in cl),
         })
 
     return trials, cluster_meta

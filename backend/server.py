@@ -48,6 +48,7 @@ from behavioural import (
     BehaviouralSession, AlignmentResult,
     parse_behavioural_session, align_block,
 )
+from merge import select_blocks
 from checks import run_subject_checks, checks_to_payload
 from logging_setup import get_logger, configure_logging
 
@@ -316,24 +317,10 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
             for w in parsed.warnings:
                 logger.warning("%s parser warning: %s", subject_id, w)
 
-        try:
-            result = run_pipeline(parsed)
-        except Exception:
-            logger.exception("run_pipeline failed for %s", subject_id)
-            raise HTTPException(500, f"{subject_id}: analysis pipeline failed. See server log for details.")
         result_id = subject_id
-        _results[result_id] = result
-        _parsed[result_id] = parsed
-        logger.info(
-            "%s pipeline OK: theta_surv=%d beta_surv=%d",
-            result_id,
-            result.theta_summary.surviving,
-            result.beta_summary.surviving,
-        )
 
-        # If behavioural data was pre-loaded under a placeholder subject_id
-        # (i.e. the CSV filename lacked S<n>P<nn> so we keyed by "?PNNN"
-        # from subject_nr alone), reconcile it with the real EEG subject_id.
+        # Reconcile any placeholder-keyed behavioural session BEFORE block
+        # selection, so an already-uploaded CSV can drive candidate choice.
         eeg_ids = parse_filename_ids(result_id)  # (session, participant) or None
         if eeg_ids is not None:
             placeholder = f"?P{eeg_ids[1]:03d}"
@@ -345,6 +332,45 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
                 _behavioural[result_id] = _behavioural.pop(placeholder)
                 _alignment.pop(placeholder, None)
 
+        # ── Block selection (work-order Task 3) ────────────────────────────
+        # If any block has >1 candidate run, choose the correct one (by
+        # behavioural alignment when available, else the trial-count
+        # fallback). On clean recordings this is a no-op. The resulting
+        # B-codes are stashed on parsed for the checks payload.
+        beh_for_selection = _behavioural.get(result_id)
+        try:
+            selection = select_blocks(parsed, beh_for_selection)
+        except Exception:
+            logger.exception("select_blocks failed for %s", result_id)
+            raise HTTPException(500, f"{result_id}: block selection failed. See server log for details.")
+        parsed.block_codes = selection.codes
+        n_before = len(parsed.trials)
+        if len(selection.selected_trials) != n_before or len(selection.candidates_by_block) != len(selection.selected_by_block):
+            logger.info(
+                "%s block selection: %d trials -> %d after selecting %d/%d block candidate(s)%s",
+                result_id, n_before, len(selection.selected_trials),
+                len(selection.selected_by_block),
+                sum(len(v) for v in selection.candidates_by_block.values()),
+                " [behavioural]" if selection.used_behavioural else " [trial-count fallback]",
+            )
+            parsed.trials = selection.selected_trials
+            parsed.n_blocks = len(selection.selected_by_block)
+
+        try:
+            result = run_pipeline(parsed)
+        except Exception:
+            logger.exception("run_pipeline failed for %s", subject_id)
+            raise HTTPException(500, f"{subject_id}: analysis pipeline failed. See server log for details.")
+        _results[result_id] = result
+        _parsed[result_id] = parsed
+        logger.info(
+            "%s pipeline OK: theta_surv=%d beta_surv=%d",
+            result_id,
+            result.theta_summary.surviving,
+            result.beta_summary.surviving,
+        )
+
+        # Behavioural was already reconciled before block selection (above).
         # If behavioural data was pre-loaded for this subject, run alignment.
         alignment = _run_alignment(result_id)
 
@@ -524,7 +550,15 @@ def _checks_payload_for(subject_id: str) -> List[dict]:
         "checks for %s: %d HALT, %d WARN, %d INFO",
         subject_id, counts.get("HALT", 0), counts.get("WARN", 0), counts.get("INFO", 0),
     )
-    return checks_to_payload(checks)
+    payload = checks_to_payload(checks)
+    # Prepend block-selection B-codes (Task 3), which are produced outside
+    # run_subject_checks (they need the candidate list from select_blocks).
+    block_codes = getattr(parsed, "block_codes", []) or []
+    b_payload = [
+        {"code": code, "level": level, "message": msg, "context": {}}
+        for code, level, msg in block_codes
+    ]
+    return b_payload + payload
 
 
 def _accuracy_payload(subject_id: str) -> List[dict]:
