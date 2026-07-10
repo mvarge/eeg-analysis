@@ -49,7 +49,13 @@ THETA_BAND    = (4.0, 8.0)      # Hz @ Fz-Pz
 BETA_BAND     = (13.0, 30.0)    # Hz @ C3-C4
 THETA_CYC     = 3.0             # Morlet cycles for theta
 BETA_CYC      = 7.0             # Morlet cycles for beta
-TOTAL_BAND    = (1.0, 40.0)     # denominator for relative power
+TOTAL_BAND    = (1.0, 35.0)     # denominator for relative power
+# NB: capped at 35 Hz (work-order Task 6). The 50 Hz acquisition low-pass
+# (confirmed from victoria_EEG_settings.adiset) rolls off before 50 Hz and
+# already attenuates 35-40 Hz, which would otherwise depress this denominator
+# and uniformly inflate every relative-power value. Capping at 35 keeps the
+# denominator entirely inside the flat passband. The theta (4-8 Hz) and beta
+# (13-30 Hz) numerators are unaffected; both remain fully inside the band.
 FREQ_STEP     = 0.5             # Hz
 
 
