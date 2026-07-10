@@ -335,126 +335,154 @@ def _parse_data_rows(
 
 # ── Top-level ──────────────────────────────────────────────────────────────
 def parse_labchart(filepath: str) -> ParsedEEG:
-    """Parse a LabChart 8 text export.
+    """Parse a single LabChart 8 text export.
 
     Handles single-segment and multi-segment files. See module docstring.
     """
-    filename = filepath.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    return parse_labchart_multi([filepath])
 
-    with open(filepath, "r", encoding="latin-1", newline="") as fh:
-        # Read all lines; the file is small enough (S1P002 is ~65 MB but that's fine).
-        lines = fh.read().splitlines()
+
+def parse_labchart_multi(filepaths: List[str]) -> ParsedEEG:
+    """Parse one or more LabChart .txt exports and merge them into a single
+    ParsedEEG as if they were one recording.
+
+    Use this when a participant's recording is split across multiple files
+    (e.g. S8P025(1).txt + S8P025(2).txt — one participant, two files).
+
+    Each file may itself contain multiple segments (mid-file restart).
+    Segments from all files are concatenated in the order the files are
+    given. Global time uses the FIRST file's first segment as t=0; every
+    subsequent segment (across all files) is placed on that timeline via
+    its own ExcelDateTime.
+
+    The ParsedEEG's `filename` becomes the first file's filename; use
+    subject_id resolution upstream if you need a canonical ID.
+    """
+    if not filepaths:
+        raise ValueError("parse_labchart_multi requires at least one file path.")
+
+    filename = filepaths[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
     warnings: List[str] = []
     segments: List[Segment] = []
     first_excel_dt: Optional[float] = None
 
-    # Walk the file, alternating header → data-block → header → data-block …
-    i = 0
     seg_index = 0
-    while i < len(lines):
-        # Skip any blank/whitespace-only lines between segments
-        while i < len(lines) and not lines[i].strip():
-            i += 1
-        if i >= len(lines):
-            break
 
-        # Try to parse a header at this position
-        header, after_header = _parse_one_header(lines, i)
-        if header is None:
-            # Not a header — if we haven't parsed any yet, that's a hard failure;
-            # if we already have segments, this is stray trailing text.
-            if not segments:
-                raise ValueError(
-                    f"No parseable LabChart header at line {i}. "
-                    "File is not a LabChart export, or the encoding is wrong."
-                )
-            break
+    for fp_idx, filepath in enumerate(filepaths):
+        with open(filepath, "r", encoding="latin-1", newline="") as fh:
+            lines = fh.read().splitlines()
 
-        # Find where the next header starts (or end of file)
-        next_header_line = len(lines)
-        for j in range(after_header, len(lines)):
-            if lines[j].lstrip().lower().startswith("interval="):
-                next_header_line = j
+        i = 0
+        segments_this_file = 0
+
+        while i < len(lines):
+            # Skip any blank/whitespace-only lines between segments
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+            if i >= len(lines):
                 break
 
-        # Parse the data rows for this segment
-        time_arr, fz_arr, c3_arr, raw_markers = _parse_data_rows(
-            lines, after_header, next_header_line
-        )
+            # Try to parse a header at this position
+            header, after_header = _parse_one_header(lines, i)
+            if header is None:
+                # Not a header — if this is the very first attempt across all
+                # files, that's a hard failure; otherwise stray trailing text.
+                if not segments:
+                    raise ValueError(
+                        f"No parseable LabChart header at line {i} in "
+                        f"{filepath!r}. File is not a LabChart export, or "
+                        "the encoding is wrong."
+                    )
+                break
 
-        # Track first segment's ExcelDateTime for global-time reconstruction
-        if first_excel_dt is None and header.excel_datetime is not None:
-            first_excel_dt = header.excel_datetime
+            # Find where the next header starts (or end of file)
+            next_header_line = len(lines)
+            for j in range(after_header, len(lines)):
+                if lines[j].lstrip().lower().startswith("interval="):
+                    next_header_line = j
+                    break
 
-        # Compute this segment's start in the global timeline
-        if first_excel_dt is not None and header.excel_datetime is not None:
-            time_start_global = (header.excel_datetime - first_excel_dt) * 86400.0
-        else:
-            # Fallback: chain segments end-to-end (imperfect but non-catastrophic)
-            time_start_global = (
-                segments[-1].time_start_global + segments[-1].duration_s if segments else 0.0
+            # Parse the data rows for this segment
+            time_arr, fz_arr, c3_arr, raw_markers = _parse_data_rows(
+                lines, after_header, next_header_line
             )
 
-        # Per-segment sanity: monotonicity + uniform interval
-        monotonic = True
-        uniform_interval = True
-        if time_arr.size > 1:
-            diffs = np.diff(time_arr)
-            monotonic = bool(np.all(diffs > 0))
-            expected = header.interval_s
-            if expected > 0:
-                # allow 5% deviation before flagging
-                uniform_interval = bool(np.all(np.abs(diffs - expected) < 0.05 * expected))
+            # Track first segment's ExcelDateTime for global-time reconstruction
+            if first_excel_dt is None and header.excel_datetime is not None:
+                first_excel_dt = header.excel_datetime
 
-        if not monotonic:
-            warnings.append(
-                f"Segment {seg_index}: local time vector is NOT monotonic. "
-                "This will corrupt any bisect/searchsorted logic. "
-                "Check for corrupted/re-ordered rows."
-            )
-        if not uniform_interval:
-            warnings.append(
-                f"Segment {seg_index}: sample interval is not uniform "
-                f"(expected {header.interval_s:.4f} s). Possible dropped samples."
-            )
+            # Compute this segment's start in the global timeline
+            if first_excel_dt is not None and header.excel_datetime is not None:
+                time_start_global = (header.excel_datetime - first_excel_dt) * 86400.0
+            else:
+                time_start_global = (
+                    segments[-1].time_start_global + segments[-1].duration_s
+                    if segments else 0.0
+                )
 
-        # Build marker list for this segment
-        segment_markers: List[Marker] = []
-        for sample_idx_local, t_local, comment in raw_markers:
-            label = _extract_marker_label(comment)
-            if not label:
-                continue
-            segment_markers.append(
-                Marker(
-                    label=label,
-                    segment_index=seg_index,
-                    sample_index_local=sample_idx_local,
-                    time_local=t_local,
-                    time_global=time_start_global + t_local,
-                    raw_comment=comment,
+            monotonic = True
+            uniform_interval = True
+            if time_arr.size > 1:
+                diffs = np.diff(time_arr)
+                monotonic = bool(np.all(diffs > 0))
+                expected = header.interval_s
+                if expected > 0:
+                    uniform_interval = bool(np.all(np.abs(diffs - expected) < 0.05 * expected))
+
+            if not monotonic:
+                warnings.append(
+                    f"Segment {seg_index} ({filepath.rsplit('/', 1)[-1]}): "
+                    "local time vector is NOT monotonic. "
+                    "This will corrupt any bisect/searchsorted logic. "
+                    "Check for corrupted/re-ordered rows."
+                )
+            if not uniform_interval:
+                warnings.append(
+                    f"Segment {seg_index} ({filepath.rsplit('/', 1)[-1]}): "
+                    f"sample interval is not uniform "
+                    f"(expected {header.interval_s:.4f} s). Possible dropped samples."
+                )
+
+            segment_markers: List[Marker] = []
+            for sample_idx_local, t_local, comment in raw_markers:
+                label = _extract_marker_label(comment)
+                if not label:
+                    continue
+                segment_markers.append(
+                    Marker(
+                        label=label,
+                        segment_index=seg_index,
+                        sample_index_local=sample_idx_local,
+                        time_local=t_local,
+                        time_global=time_start_global + t_local,
+                        raw_comment=comment,
+                    )
+                )
+
+            segments.append(
+                Segment(
+                    index=seg_index,
+                    header=header,
+                    fz=fz_arr,
+                    c3=c3_arr,
+                    local_time=time_arr,
+                    markers=segment_markers,
+                    time_start_global=time_start_global,
+                    monotonic=monotonic,
+                    uniform_interval=uniform_interval,
                 )
             )
 
-        segments.append(
-            Segment(
-                index=seg_index,
-                header=header,
-                fz=fz_arr,
-                c3=c3_arr,
-                local_time=time_arr,
-                markers=segment_markers,
-                time_start_global=time_start_global,
-                monotonic=monotonic,
-                uniform_interval=uniform_interval,
-            )
-        )
+            seg_index += 1
+            segments_this_file += 1
+            i = next_header_line
 
-        seg_index += 1
-        i = next_header_line
+        if segments_this_file == 0:
+            raise ValueError(f"No parseable segments in {filepath!r}.")
 
     if not segments:
-        raise ValueError("File contains no parseable data segments.")
+        raise ValueError("No parseable data segments across any input file.")
 
     # ── Assemble top-level (concatenated) arrays and marker list ──────────
     fz_all = np.concatenate([s.fz for s in segments]) if segments else np.zeros(0)

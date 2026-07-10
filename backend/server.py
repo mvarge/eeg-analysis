@@ -31,7 +31,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from parser import parse_labchart
+from parser import parse_labchart, parse_labchart_multi
+from subject_id import parse_filename as parse_upload_filename
 from pipeline import (
     PipelineResult, TrialResult, ChannelSummary,
     BLINK_UV, EMG_BETA, BURST_Z, BURST_IMPACT, COINC_Z,
@@ -227,22 +228,58 @@ def _spectra_payload(r: PipelineResult) -> dict:
 #  Endpoints
 # ============================================================
 @app.post("/api/upload")
-async def upload_eeg(file: UploadFile = File(...)):
-    """Upload and analyse a LabChart .txt export."""
-    if not file.filename.endswith(".txt"):
-        raise HTTPException(400, "Please upload a .txt LabChart export file")
+async def upload_eeg(files: List[UploadFile] = File(...)):
+    """Upload and analyse one or more LabChart .txt exports.
 
-    content = await file.read()
-    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="wb") as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
+    All files sent in a single request MUST belong to the same subject
+    (same canonical `S<n>P<nn>` code). They are treated as one recording
+    split across multiple files (e.g. S8P025(1).txt + S8P025(2).txt).
 
+    Files are ordered by their filename `part_hint` (1 before 2 before
+    unknown), then alphabetically as a tiebreak. This is a UI-ordering
+    convenience only — the parser uses each file's ExcelDateTime to
+    build the true global timeline.
+
+    Backward compatible: single-file uploads work unchanged, and the
+    response shape is identical to the previous version.
+    """
+    if not files:
+        raise HTTPException(400, "No files uploaded.")
+    for f in files:
+        if not f.filename.lower().endswith(".txt"):
+            raise HTTPException(400, f"{f.filename}: only .txt LabChart exports are accepted")
+
+    # Resolve subject IDs and require all files in one request to agree.
+    parsed_names = [parse_upload_filename(f.filename) for f in files]
+    sids = {p.subject_id for p in parsed_names}
+    if len(sids) > 1:
+        raise HTTPException(
+            400,
+            f"Files in one upload must share a subject ID; got {sorted(sids)}. "
+            "Upload each subject's files as a separate request.",
+        )
+    subject_id = parsed_names[0].subject_id
+
+    # Order: part 1 → 2 → unknown; alphabetical tiebreak.
+    ordered = sorted(
+        zip(files, parsed_names),
+        key=lambda x: (x[1].part is None, x[1].part or 0, x[1].original.lower()),
+    )
+    files_ordered = [f for f, _ in ordered]
+
+    tmp_paths: List[str] = []
     try:
-        parsed = parse_labchart(tmp_path)
-        parsed.filename = file.filename.replace(".txt", "")
+        for f in files_ordered:
+            content = await f.read()
+            with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="wb") as tmp:
+                tmp.write(content)
+                tmp_paths.append(tmp.name)
+
+        parsed = parse_labchart_multi(tmp_paths)
+        parsed.filename = subject_id
 
         result = run_pipeline(parsed)
-        result_id = parsed.filename
+        result_id = subject_id
         _results[result_id] = result
 
         return {
@@ -251,12 +288,20 @@ async def upload_eeg(file: UploadFile = File(...)):
             "summary": _summary_payload(result),
             "trials": [_trial_row(t) for t in result.trials],
             "spectra": _spectra_payload(result),
+            "source_files": [p.original for _, p in ordered],
+            "warnings": parsed.warnings,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Processing error: {e}")
     finally:
-        os.unlink(tmp_path)
+        for p in tmp_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 @app.get("/api/subjects")

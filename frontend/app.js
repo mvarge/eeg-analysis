@@ -136,19 +136,34 @@ function initUpload() {
         const progressText = progress.querySelector('.progress-text');
         fill.classList.add('indeterminate');
 
+        // Group files by canonical subject ID so that e.g. S8P025(1).txt and
+        // S8P025(2).txt are uploaded together as one subject. Anything that
+        // doesn't match `S<n>P<nn>` falls back to its filename stem.
+        const groups = new Map();  // subject_id -> File[]
+        for (const f of files) {
+            const sid = subjectIdFromFilename(f.name);
+            if (!groups.has(sid)) groups.set(sid, []);
+            groups.get(sid).push(f);
+        }
+
         let lastData = null;
         let count = 0;
+        const groupList = Array.from(groups.entries());
 
-        for (let i = 0; i < files.length; i++) {
-            progressText.textContent = `Processing ${files[i].name} (${i + 1}/${files.length})...`;
+        for (let i = 0; i < groupList.length; i++) {
+            const [sid, group] = groupList[i];
+            const label = group.length === 1
+                ? group[0].name
+                : `${sid} (${group.length} files)`;
+            progressText.textContent = `Processing ${label} (${i + 1}/${groupList.length})...`;
             const formData = new FormData();
-            formData.append('file', files[i]);
+            for (const f of group) formData.append('files', f);
 
             try {
                 const resp = await fetch(`${API}/api/upload`, { method: 'POST', body: formData });
                 if (!resp.ok) {
                     const err = await resp.json();
-                    throw new Error(`${files[i].name}: ${err.detail || 'Upload failed'}`);
+                    throw new Error(`${label}: ${err.detail || 'Upload failed'}`);
                 }
                 const data = await resp.json();
                 lastData = data;
@@ -171,7 +186,7 @@ function initUpload() {
 
         fill.classList.remove('indeterminate');
         fill.style.width = '100%';
-        progressText.textContent = `Done! ${count} file${count > 1 ? 's' : ''} processed.`;
+        progressText.textContent = `Done! ${count} subject${count > 1 ? 's' : ''} processed.`;
 
         setTimeout(() => {
             if (count === 1) {
@@ -182,6 +197,18 @@ function initUpload() {
             }
         }, 600);
     }
+}
+
+// Canonical subject ID from an uploaded filename.
+// "S1P002.txt" → "S1P002", "S8P025(1).txt" → "S8P025",
+// "S3P006 (flanker-partial).csv" → "S3P006",
+// falls back to the extensionless stem if nothing matches.
+function subjectIdFromFilename(name) {
+    const base = name.replace(/^.*[\\/]/, '');
+    const m = base.match(/^\s*(S\d+P\d+)\s*/i);
+    if (m) return m[1].toUpperCase();
+    const dot = base.lastIndexOf('.');
+    return (dot > 0 ? base.slice(0, dot) : base);
 }
 
 // ── Demographics upload ──
