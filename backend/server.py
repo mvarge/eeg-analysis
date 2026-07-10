@@ -1005,17 +1005,29 @@ SUMMARY_HEADER = [
     "beta_b2_surv_con", "beta_b2_surv_inc", "beta_b2_exc_con", "beta_b2_exc_inc",
     "beta_b2_rel_median_con", "beta_b2_rel_median_inc",
     "beta_b2_abs_median_con", "beta_b2_abs_median_inc",
+    # Adaptive thresholds + contamination metrics (work-order Tasks 4/5/7/8)
+    "blink_threshold_uv", "emg_threshold", "fz_ptp_median",
+    "c3_beta_share", "c3_high_share",
+    "theta_channel_excluded", "theta_exclusion_code",
+    "beta_channel_excluded", "beta_exclusion_code",
 ]
+
+
+def _r6(v):
+    """round() that passes None through (channel-excluded power is None)."""
+    return "" if v is None else round(v, 6)
 
 
 def _block_cells(summary: ChannelSummary, blk: int) -> list:
     b = (summary.by_block or {}).get(blk)
     if not b:
         return ["", "", "", "", "", "", "", ""]
+    # When the channel is scope-excluded, power medians must not be reported.
+    excl = summary.channel_excluded
     return [
         b["n_surv_con"], b["n_surv_inc"], b["n_exc_con"], b["n_exc_inc"],
-        round(b["rel_median_con"], 6), round(b["rel_median_inc"], 6),
-        round(b["abs_median_con"], 6), round(b["abs_median_inc"], 6),
+        "" if excl else _r6(b["rel_median_con"]), "" if excl else _r6(b["rel_median_inc"]),
+        "" if excl else _r6(b["abs_median_con"]), "" if excl else _r6(b["abs_median_inc"]),
     ]
 
 
@@ -1023,15 +1035,16 @@ def _summary_row(r: PipelineResult, demo_cols=None) -> list:
     if demo_cols is None:
         demo_cols = _demographic_columns()
     ts, bs = r.theta_summary, r.beta_summary
+    te, be = ts.channel_excluded, bs.channel_excluded
     demo = match_demographics(r.filename, _demographics) if _demographics else None
     row = [
         r.filename, r.recording_date,
         ts.surviving, ts.excluded,
-        round(ts.rel_median_con, 6), round(ts.rel_median_inc, 6),
-        round(ts.abs_median_con, 6), round(ts.abs_median_inc, 6),
+        "" if te else _r6(ts.rel_median_con), "" if te else _r6(ts.rel_median_inc),
+        "" if te else _r6(ts.abs_median_con), "" if te else _r6(ts.abs_median_inc),
         bs.surviving, bs.excluded,
-        round(bs.rel_median_con, 6), round(bs.rel_median_inc, 6),
-        round(bs.abs_median_con, 6), round(bs.abs_median_inc, 6),
+        "" if be else _r6(bs.rel_median_con), "" if be else _r6(bs.rel_median_inc),
+        "" if be else _r6(bs.abs_median_con), "" if be else _r6(bs.abs_median_inc),
         round(ts.exclusion_pct_con, 2), round(ts.exclusion_pct_inc, 2), ts.balance_flag,
         round(bs.exclusion_pct_con, 2), round(bs.exclusion_pct_inc, 2), bs.balance_flag,
         demo.block_order.get(1, "") if demo else "",
@@ -1042,6 +1055,16 @@ def _summary_row(r: PipelineResult, demo_cols=None) -> list:
     row.extend(_block_cells(ts, 2))
     row.extend(_block_cells(bs, 1))
     row.extend(_block_cells(bs, 2))
+    # Adaptive + contamination + channel-exclusion columns
+    row.extend([
+        round(getattr(r, "blink_threshold_uv", 0.0), 1),
+        round(getattr(r, "emg_threshold", 0.0), 0),
+        round(getattr(r, "fz_ptp_median", 0.0), 1),
+        round(getattr(r, "c3_beta_share", 0.0), 4),
+        round(getattr(r, "c3_high_share", 0.0), 4),
+        ts.channel_excluded, ts.exclusion_code,
+        bs.channel_excluded, bs.exclusion_code,
+    ])
     row.extend(_demographic_values(r.filename, demo_cols))
     return row
 
