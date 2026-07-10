@@ -144,6 +144,14 @@ class ChannelSummary:
     #     'abs_median_con', 'abs_median_inc',
     #     'rel_median_con', 'rel_median_inc'}}
     by_block: dict
+    # Channel-scoped exclusion (work-order Task 7). When a contamination
+    # finding (e.g. S005 on C3-C4 beta) invalidates ONE derivation/band, that
+    # channel is marked excluded here while the other channel and behavioural
+    # data are retained. When True, power values above are not to be reported
+    # (the payload nulls them) and `exclusion_code`/`exclusion_reason` say why.
+    channel_excluded: bool = False
+    exclusion_code: str = ""
+    exclusion_reason: str = ""
 
 
 @dataclass
@@ -171,6 +179,13 @@ class PipelineResult:
     # Per-trial spectra (n_trials × n_freqs) for the "all trials" toggle view
     theta_spec_all: np.ndarray
     beta_spec_all: np.ndarray
+
+    # C3-C4 spectral-shape metrics over analysed epochs (Task 8 / S005 inputs).
+    c3_beta_share: float = 0.0        # 13-30 Hz ÷ total
+    c3_high_share: float = 0.0        # 30-TOTAL_BAND[1] Hz ÷ total
+    # Adaptive-threshold values this recording used (for QC display).
+    blink_threshold_uv: float = 0.0
+    emg_threshold: float = 0.0
 
 
 # ============================================================
@@ -397,6 +412,27 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
     beta_tot = beta_spec.sum(axis=1)
     beta_rel = np.where(beta_tot > 0, beta_spec[:, BE_MASK].sum(axis=1) / beta_tot, 0.0)
 
+    # ---- C3 contamination metrics (work-order Task 8 / S005 inputs) -------
+    # Spectral-shape descriptors of the C3-C4 derivation, averaged over the
+    # analysed epochs (hard rule 3 — never the whole file). Broadband EMG piles
+    # power into and above the beta band, so beta share and 30-Hz-and-up share
+    # rise together. Computed from THIS recording's own mean beta wavelet
+    # spectrum. NB: TOTAL_BAND caps at 35 Hz (Task 6), so the "high band" here
+    # is 30-35 Hz, not the doc's 30-40 Hz; the S005 threshold is calibrated to
+    # this basis when the real fixtures arrive. Stored, not yet thresholded.
+    HI_MASK = (FREQS >= 30.0) & (FREQS <= TOTAL_BAND[1])
+    mean_beta_spec = beta_spec.mean(axis=0) if len(beta_spec) else np.zeros_like(FREQS)
+    c3_total_power = float(mean_beta_spec.sum())
+    if c3_total_power > 0:
+        c3_beta_share = float(mean_beta_spec[BE_MASK].sum() / c3_total_power)
+        c3_high_share = float(mean_beta_spec[HI_MASK].sum() / c3_total_power)
+    else:
+        c3_beta_share = c3_high_share = 0.0
+    logger.info(
+        "%s C3 spectral shape: beta(13-30)=%.1f%% high(30-%d)=%.1f%%",
+        parsed.filename, c3_beta_share * 100, int(TOTAL_BAND[1]), c3_high_share * 100,
+    )
+
     # ---- Adaptive EMG threshold (work-order Task 5) -----------------------
     # median + EMG_K · (1.4826·MAD) of THIS recording's own C3 beta-power
     # distribution, pooled across conditions (condition-blind, hard rule 5).
@@ -485,7 +521,33 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
         beta_spectrum_excluded=_mean_spec(beta_spec,  (~keep_beta)),
         theta_spec_all=theta_spec,
         beta_spec_all=beta_spec,
+        c3_beta_share=c3_beta_share,
+        c3_high_share=c3_high_share,
+        blink_threshold_uv=blink_thresh,
+        emg_threshold=emg_thresh,
     )
+
+
+def apply_channel_exclusion(result: PipelineResult, channel: str, code: str, reason: str) -> None:
+    """Mark one derivation/band as scope-excluded (work-order Task 7).
+
+    A contamination finding (e.g. S005 on C3-C4 beta) invalidates that channel
+    while the other channel and behavioural data are retained. This flags the
+    matching ChannelSummary; the payload then nulls its power values so they
+    cannot be mistaken for valid, and records the triggering code + measured
+    value. Idempotent; safe to call for either 'Fz-Pz' or 'C3-C4'.
+    """
+    for summary in (result.theta_summary, result.beta_summary):
+        if summary.channel == channel:
+            summary.channel_excluded = True
+            summary.exclusion_code = code
+            summary.exclusion_reason = reason
+            logger.warning(
+                "%s: channel-scoped exclusion — %s %s (%s)",
+                result.filename, channel, summary.band, reason,
+            )
+            return
+    logger.error("apply_channel_exclusion: unknown channel %r", channel)
 
 
 def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude_attr: str) -> ChannelSummary:

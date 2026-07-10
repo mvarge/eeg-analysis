@@ -158,6 +158,10 @@ def _summary_payload(r: PipelineResult) -> dict:
 
 
 def _channel_payload(s: ChannelSummary) -> dict:
+    # When a channel is scope-excluded (Task 7), its power values must not be
+    # reported (acceptance: "no beta power reported"). Survival/exclusion
+    # bookkeeping is kept so the reader sees why it was dropped.
+    excl = s.channel_excluded
     by_block = {}
     for blk, b in (s.by_block or {}).items():
         by_block[str(blk)] = {
@@ -169,10 +173,10 @@ def _channel_payload(s: ChannelSummary) -> dict:
             "n_exc_inc": b["n_exc_inc"],
             "exclusion_pct_con": _safe(round(b["exclusion_pct_con"], 1)),
             "exclusion_pct_inc": _safe(round(b["exclusion_pct_inc"], 1)),
-            "abs_median_con": _safe(round(b["abs_median_con"], 3)),
-            "abs_median_inc": _safe(round(b["abs_median_inc"], 3)),
-            "rel_median_con": _safe(round(b["rel_median_con"], 4)),
-            "rel_median_inc": _safe(round(b["rel_median_inc"], 4)),
+            "abs_median_con": None if excl else _safe(round(b["abs_median_con"], 3)),
+            "abs_median_inc": None if excl else _safe(round(b["abs_median_inc"], 3)),
+            "rel_median_con": None if excl else _safe(round(b["rel_median_con"], 4)),
+            "rel_median_inc": None if excl else _safe(round(b["rel_median_inc"], 4)),
         }
     return {
         "channel": s.channel,
@@ -184,11 +188,17 @@ def _channel_payload(s: ChannelSummary) -> dict:
         "exclusion_pct_con": _safe(round(s.exclusion_pct_con, 1)),
         "exclusion_pct_inc": _safe(round(s.exclusion_pct_inc, 1)),
         "balance_flag": s.balance_flag,
-        "abs_median_con": _safe(round(s.abs_median_con, 3)),
-        "abs_median_inc": _safe(round(s.abs_median_inc, 3)),
-        "rel_median_con": _safe(round(s.rel_median_con, 4)),
-        "rel_median_inc": _safe(round(s.rel_median_inc, 4)),
+        "abs_median_con": None if excl else _safe(round(s.abs_median_con, 3)),
+        "abs_median_inc": None if excl else _safe(round(s.abs_median_inc, 3)),
+        "rel_median_con": None if excl else _safe(round(s.rel_median_con, 4)),
+        "rel_median_inc": None if excl else _safe(round(s.rel_median_inc, 4)),
         "by_block": by_block,
+        # Channel-scoped exclusion (Task 7). When True, this derivation/band
+        # was invalidated by a contamination finding; power values are nulled
+        # so a downstream consumer can't mistake them for valid.
+        "channel_excluded": s.channel_excluded,
+        "exclusion_code": s.exclusion_code,
+        "exclusion_reason": s.exclusion_reason,
     }
 
 
