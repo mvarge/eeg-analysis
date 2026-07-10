@@ -20,6 +20,7 @@ import csv
 import io
 import math
 import os
+import re
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
@@ -43,6 +44,10 @@ from demographics import (
     Demographic, DISPLAY_FIELDS,
     parse_demographics, match_demographics, parse_filename_ids,
 )
+from behavioural import (
+    BehaviouralSession, AlignmentResult,
+    parse_behavioural_session, align_block,
+)
 
 
 app = FastAPI(title="EEG Flanker Analysis")
@@ -55,6 +60,8 @@ app.add_middleware(
 )
 
 _results: Dict[str, PipelineResult] = {}
+_behavioural: Dict[str, BehaviouralSession] = {}   # subject_id → parsed behavioural
+_alignment: Dict[str, List[AlignmentResult]] = {}  # subject_id → per-block alignment
 _demographics: List[Demographic] = []           # loaded from most recent CSV upload
 _demographics_source: str | None = None         # filename of the CSV upload, for UI
 
@@ -282,6 +289,19 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
         result_id = subject_id
         _results[result_id] = result
 
+        # If behavioural data was pre-loaded under a placeholder subject_id
+        # (i.e. the CSV filename lacked S<n>P<nn> so we keyed by "?PNNN"
+        # from subject_nr alone), reconcile it with the real EEG subject_id.
+        eeg_ids = parse_filename_ids(result_id)  # (session, participant) or None
+        if eeg_ids is not None:
+            placeholder = f"?P{eeg_ids[1]:03d}"
+            if placeholder in _behavioural and placeholder != result_id:
+                _behavioural[result_id] = _behavioural.pop(placeholder)
+                _alignment.pop(placeholder, None)
+
+        # If behavioural data was pre-loaded for this subject, run alignment.
+        alignment = _run_alignment(result_id)
+
         return {
             "status": "success",
             "result_id": result_id,
@@ -290,6 +310,7 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
             "spectra": _spectra_payload(result),
             "source_files": [p.original for _, p in ordered],
             "warnings": parsed.warnings,
+            "alignment": [_alignment_payload(a) for a in alignment],
         }
 
     except HTTPException:
@@ -326,6 +347,7 @@ async def list_subjects():
 async def remove_subject(result_id: str):
     """Drop one subject from memory."""
     _results.pop(result_id, None)
+    _alignment.pop(result_id, None)
     return {"status": "ok"}
 
 
@@ -397,6 +419,152 @@ async def clear_demographics():
     global _demographics, _demographics_source
     _demographics = []
     _demographics_source = None
+    return {"status": "ok"}
+
+
+# ============================================================
+#  Behavioural (OpenSesame CSV)
+# ============================================================
+def _alignment_payload(res: AlignmentResult) -> dict:
+    return {
+        "block": res.block,
+        "eeg_offset_ms": _safe(res.eeg_offset_ms),
+        "matched": len(res.matched_pairs),
+        "unmatched_eeg": len(res.unmatched_eeg_indices),
+        "unmatched_beh": len(res.unmatched_beh_indices),
+        "unmatched_beh_row_indices": res.unmatched_beh_indices,
+        "rt_correlation": _safe(res.rt_correlation),
+        "congruency_agreement": _safe(res.congruency_agreement),
+    }
+
+
+def _run_alignment(subject_id: str) -> List[AlignmentResult]:
+    """Align the subject's EEG trials against its behavioural session.
+
+    Called after either an EEG or behavioural upload for the same subject.
+    No-op (returns []) if either side is missing. Stored in _alignment.
+    """
+    if subject_id not in _results or subject_id not in _behavioural:
+        _alignment.pop(subject_id, None)
+        return []
+    result = _results[subject_id]
+    session = _behavioural[subject_id]
+    per_block: List[AlignmentResult] = []
+    blocks = sorted({t.block for t in result.trials})
+    for blk in blocks:
+        eeg_block = [t for t in result.trials if t.block == blk]
+        per_block.append(align_block(
+            eeg_rts_ms=[t.rt_ms for t in eeg_block],
+            eeg_congruent=[t.cond == "con" for t in eeg_block],
+            beh_trials=session.trials,
+            block=blk,
+        ))
+    _alignment[subject_id] = per_block
+    return per_block
+
+
+@app.post("/api/behavioural/upload")
+async def upload_behavioural(files: List[UploadFile] = File(...)):
+    """Upload one or more OpenSesame behavioural CSVs for a single subject.
+
+    All files in one request must share a subject ID (matched to the
+    canonical `S<n>P<nn>` code either via filename or, failing that, the
+    `subject_nr` column). Files are concatenated in filename-part order;
+    block labels come from each row's `stage` column, not from the
+    filename.
+
+    If the EEG for this subject is already loaded, per-block alignment
+    is computed and returned. Otherwise the behavioural data is stored
+    and alignment is deferred until the EEG arrives.
+    """
+    if not files:
+        raise HTTPException(400, "No files uploaded.")
+    for f in files:
+        if not f.filename.lower().endswith(".csv"):
+            raise HTTPException(400, f"{f.filename}: only .csv behavioural files are accepted")
+
+    parsed_names = [parse_upload_filename(f.filename) for f in files]
+    # A filename yields a subject_id only if it starts with S<n>P<nn>;
+    # otherwise its `subject_id` is the extension-less stem, which we
+    # ignore for matching purposes and resolve via `subject_nr` below.
+    sids_from_filename = {
+        p.subject_id for p in parsed_names
+        if re.match(r"^S\d+P\d+$", p.subject_id)
+    }
+    if len(sids_from_filename) > 1:
+        raise HTTPException(
+            400,
+            f"Behavioural files in one upload must share a subject ID; "
+            f"got {sorted(sids_from_filename)}."
+        )
+    filename_subject_id = next(iter(sids_from_filename)) if sids_from_filename else None
+
+    ordered = sorted(
+        zip(files, parsed_names),
+        key=lambda x: (x[1].part is None, x[1].part or 0, x[1].original.lower()),
+    )
+
+    file_bytes: List[tuple[bytes, str]] = []
+    for f, p in ordered:
+        file_bytes.append((await f.read(), p.original))
+
+    try:
+        session = parse_behavioural_session(file_bytes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    # Resolve the final subject_id. Priority order:
+    #   1. S<n>P<nn> code found in any of the uploaded filenames.
+    #   2. Match `subject_nr` against an already-loaded EEG subject.
+    #   3. Fabricate a placeholder from subject_nr alone (`?PNNN` with
+    #      unknown session — will not match EEG until it's loaded).
+    subject_id = filename_subject_id
+    if subject_id is None:
+        # Try to find an EEG subject whose parsed filename gives the same participant.
+        for rid in _results:
+            ids = parse_filename_ids(rid)
+            if ids and ids[1] == session.subject_nr:
+                subject_id = rid
+                break
+    if subject_id is None:
+        subject_id = f"?P{session.subject_nr:03d}"
+
+    _behavioural[subject_id] = session
+    alignment = _run_alignment(subject_id)
+
+    return {
+        "status": "success",
+        "subject_id": subject_id,
+        "n_trials": len(session.trials),
+        "variants": [f.variant for f in session.files],
+        "source_files": [f.filename for f in session.files],
+        "warnings": session.warnings,
+        "eeg_loaded": subject_id in _results,
+        "alignment": [_alignment_payload(a) for a in alignment],
+    }
+
+
+@app.get("/api/behavioural/{subject_id}")
+async def get_behavioural(subject_id: str):
+    if subject_id not in _behavioural:
+        raise HTTPException(404, f"No behavioural data loaded for {subject_id}.")
+    session = _behavioural[subject_id]
+    alignment = _alignment.get(subject_id, [])
+    return {
+        "subject_id": subject_id,
+        "n_trials": len(session.trials),
+        "variants": [f.variant for f in session.files],
+        "source_files": [f.filename for f in session.files],
+        "warnings": session.warnings,
+        "eeg_loaded": subject_id in _results,
+        "alignment": [_alignment_payload(a) for a in alignment],
+    }
+
+
+@app.delete("/api/behavioural/{subject_id}")
+async def remove_behavioural(subject_id: str):
+    _behavioural.pop(subject_id, None)
+    _alignment.pop(subject_id, None)
     return {"status": "ok"}
 
 
