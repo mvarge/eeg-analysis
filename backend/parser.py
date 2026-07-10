@@ -160,6 +160,12 @@ class ParsedEEG:
     # after select_blocks(); each entry is (code, level, message). Read by
     # the checks payload so B000/B001/B002 surface in the validity panel.
     block_codes: List[tuple] = field(default_factory=list)
+    # Adaptive-blink slow-band inputs (work-order Task 4). Populated by
+    # run_pipeline; read by the S007 check (missed small blinks). One
+    # slow-band peak-to-peak value (µV) per analysed trial, plus the frozen
+    # median+K·MAD threshold that recording used.
+    blink_slow_ptp: List[float] = field(default_factory=list)
+    blink_threshold_uv: float = 0.0
 
     @property
     def n_segments(self) -> int:

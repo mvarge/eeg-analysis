@@ -36,7 +36,7 @@ from parser import parse_labchart, parse_labchart_multi, ParsedEEG
 from subject_id import parse_filename as parse_upload_filename
 from pipeline import (
     PipelineResult, TrialResult, ChannelSummary,
-    BLINK_UV, EMG_BETA, BURST_Z, BURST_IMPACT, COINC_Z,
+    BLINK_UV, BLINK_SLOW_HZ, BLINK_K, EMG_BETA, BURST_Z, BURST_IMPACT, COINC_Z,
     HP_HZ, WIN_S, PAD_S, THETA_BAND, BETA_BAND, TOTAL_BAND,
     run_pipeline,
 )
@@ -147,6 +147,8 @@ def _summary_payload(r: PipelineResult) -> dict:
             "beta_band": list(BETA_BAND),
             "total_band": list(TOTAL_BAND),
             "blink_uv": BLINK_UV,
+            "blink_slow_hz": BLINK_SLOW_HZ,
+            "blink_k": BLINK_K,
             "emg_beta": EMG_BETA,
             "burst_z": BURST_Z,
             "burst_impact": BURST_IMPACT,

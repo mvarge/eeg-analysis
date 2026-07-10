@@ -38,9 +38,22 @@ PAD_S         = 0.300           # epoch padding each side (>= wavelet reach)
 REACH_S       = 0.179           # wavelet reach (1.5 * 3 cycles / (2π * 4 Hz))
 
 # Exclusion thresholds (from S1P002 validation)
-BLINK_UV      = 80              # Fz peak-to-peak (µV) over window+reach
+BLINK_UV      = 80              # Fz peak-to-peak (µV) — legacy full-band cutoff,
+                               # retained only for reporting/back-compat. The
+                               # blink DECISION now uses the adaptive rule below.
+# Adaptive blink detection (work-order Task 4). Blinks are detected on a
+# 1-7 Hz low-passed Fz signal (isolates the slow blink shape from higher-freq
+# noise) and thresholded at median + BLINK_K · MAD of THIS recording's own
+# slow-band peak-to-peak deflections, computed over the 675 ms check window.
+# The reference *distribution* is per-recording; BLINK_K is a single frozen
+# constant applied identically to every file (hard rule 1). BLINK_K = 10.0 is
+# frozen to reproduce S1P002's reference blink set (43-44 flags, θ surv 116);
+# because each file uses its own median/MAD, the same K catches the smaller
+# 30-50 µV blinks on other recordings.
+BLINK_SLOW_HZ = 7.0            # low-pass (Hz) isolating the slow blink shape
+BLINK_K       = 10.0           # frozen MAD multiplier (see note above)
 EMG_BETA      = 150_000         # C3 beta power (µV²) in window
-BURST_Z       = 3.6             # C3 max |z| in window .... AND ....
+BURST_Z       = 3.6            # C3 max |z| in window .... AND ....
 BURST_IMPACT  = 15              # ... % change in beta when spike removed
 COINC_Z       = 3.0             # simultaneous z on BOTH channels
 
@@ -300,13 +313,41 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
         ))
 
     # ---- STAGE 6: blink detection + exclusion flags -----------------------
-    # Blink = Fz peak-to-peak > BLINK_UV over window+reach (post-key blinks bleed back)
-    span = epochs.copy().crop(0, WIN_S + REACH_S)
-    fz_only = span.copy().pick(["Fz-Pz"])
-    fz_only.drop_bad(reject=dict(eeg=BLINK_UV * 1e-6), verbose=False)
-    blink_flags = [len(dl) > 0 for dl in fz_only.drop_log]
+    # Adaptive blink detection (work-order Task 4). Detect on a 1-7 Hz
+    # low-passed Fz signal so the slow blink deflection is isolated from
+    # higher-frequency noise, then threshold at median + BLINK_K · MAD of THIS
+    # recording's own slow-band peak-to-peak values over the 675 ms check
+    # window (WIN_S + REACH_S, hard rule 6). The distribution is per-recording;
+    # BLINK_K is frozen (hard rule 1). We index the continuous slow-band signal
+    # by each trial's concatenated onset sample — the same windowing used for
+    # the NaN check — rather than re-epoching.
+    raw_slow = raw_hp.copy().filter(l_freq=None, h_freq=BLINK_SLOW_HZ, verbose=False)
+    fz_slow = raw_slow.get_data(picks="Fz-Pz")[0] * 1e6   # µV, continuous
+    n_cont = len(fz_slow)
+    check_win = int(round((WIN_S + REACH_S) * fs))
+    slow_ptp = np.empty(n_trials, dtype=float)
+    for i, t in enumerate(trials_meta):
+        lo = t.onset_sample_concat
+        hi = min(lo + check_win, n_cont)
+        seg = fz_slow[lo:hi]
+        slow_ptp[i] = float(seg.max() - seg.min()) if seg.size else 0.0
 
-    # Also read Fz peak-to-peak (µV) over window+reach for reporting
+    # median + K·MAD threshold, this recording's own slow-band distribution
+    slow_median = float(np.median(slow_ptp)) if n_trials else 0.0
+    slow_mad = float(np.median(np.abs(slow_ptp - slow_median))) if n_trials else 0.0
+    blink_thresh = slow_median + BLINK_K * slow_mad
+    blink_flags = [bool(v > blink_thresh) for v in slow_ptp]
+    logger.info(
+        "%s blink (adaptive slow-band): median=%.1f MAD=%.1f K=%.1f thr=%.1fµV -> %d flagged",
+        parsed.filename, slow_median, slow_mad, BLINK_K, blink_thresh, sum(blink_flags),
+    )
+    # Expose slow-band inputs for the S007 check (missed small blinks).
+    parsed.blink_slow_ptp = slow_ptp.tolist()
+    parsed.blink_threshold_uv = blink_thresh
+
+    # Also read Fz peak-to-peak (µV) over window+reach for reporting (legacy
+    # full-band metric; no longer drives the decision).
+    span = epochs.copy().crop(0, WIN_S + REACH_S)
     span_data = span.get_data(copy=True) * 1e6
     fz_ptp = span_data[:, 0, :].max(axis=1) - span_data[:, 0, :].min(axis=1)
 
@@ -357,7 +398,7 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
 
         reasons = []
         if blink:
-            reasons.append(f"blink (Fz ptp>{BLINK_UV}µV)")
+            reasons.append(f"blink (Fz slow-band ptp>{blink_thresh:.0f}µV)")
         if coinc > COINC_Z:
             reasons.append(f"coincident transient (z={coinc:.1f})")
         if beta_val > EMG_BETA:
