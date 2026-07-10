@@ -39,6 +39,9 @@ from parser import (
 from pipeline import PipelineResult, TrialResult, WIN_S, PAD_S
 from behavioural import BehaviouralSession, AlignmentResult
 from demographics import Demographic
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 # Levels

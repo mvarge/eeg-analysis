@@ -30,6 +30,10 @@ import io
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence
 
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 
 # ── Constants ──────────────────────────────────────────────────────────────
 REQUIRED_COLUMNS = (

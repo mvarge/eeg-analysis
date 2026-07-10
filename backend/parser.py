@@ -45,6 +45,10 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 
 # ── Constants ──────────────────────────────────────────────────────────────
 BLOCK_GAP_S = 30.0                 # marker gap that separates the two blocks
@@ -144,6 +148,10 @@ class ParsedEEG:
     segments: List[Segment]               # per-segment detail
     # Byte-for-byte diagnostics available on request
     warnings: List[str] = field(default_factory=list)
+    # Cluster metadata (one entry per marker cluster detected before
+    # committing to blocks). Used by the B-family validity checks to
+    # detect ambiguous or split recordings.
+    cluster_meta: List[dict] = field(default_factory=list)
 
     @property
     def n_segments(self) -> int:
@@ -360,6 +368,7 @@ def parse_labchart_multi(filepaths: List[str]) -> ParsedEEG:
     """
     if not filepaths:
         raise ValueError("parse_labchart_multi requires at least one file path.")
+    logger.debug("parse_labchart_multi: %d input file(s)", len(filepaths))
 
     filename = filepaths[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
@@ -519,7 +528,7 @@ def parse_labchart_multi(filepaths: List[str]) -> ParsedEEG:
         )
 
     # ── Trial pairing ────────────────────────────────────────────────────
-    trials = _pair_trials(all_markers, segment_concat_offsets)
+    trials, cluster_meta = _pair_trials(all_markers, segment_concat_offsets)
     n_blocks = len({t.block for t in trials}) if trials else 0
 
     return ParsedEEG(
@@ -534,13 +543,37 @@ def parse_labchart_multi(filepaths: List[str]) -> ParsedEEG:
         n_blocks=n_blocks,
         segments=segments,
         warnings=warnings,
+        cluster_meta=cluster_meta,
     )
 
 
 # ── Trial pairing + block detection ────────────────────────────────────────
-def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[int]] = None) -> List[Trial]:
+def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[int]] = None) -> Tuple[List[Trial], List[dict]]:
     """Pair each stimulus onset (con/first) with the next `key` before the
     next onset marker. Assign a block using the `second`-marker rule.
+
+    Returns `(trials, cluster_meta)`. `cluster_meta` is a list of dicts
+    describing each detected marker cluster:
+
+        {
+            "index": i,
+            "assigned_block": 1 or 2,
+            "n_trials": int,
+            "n_con": int,
+            "n_inc": int,       # incongruent (label == 'first' onset)
+            "t_start_global": float,
+            "t_end_global": float,
+            "has_second": bool,
+            "has_end": bool,
+        }
+
+    This metadata is what the B-family checks use to detect ambiguous
+    segment structures (docs §6). The current implementation still
+    commits to one trial list — segment SELECTION (choosing between
+    duplicate candidates) is deferred to a future phase where every
+    candidate is re-aligned against the behavioural data. Until then,
+    ambiguous files produce a HALT via B002 in checks.py so wrong
+    numbers cannot leak through silently.
 
     `segment_concat_offsets[i]` is the sample-index offset of segment `i`
     within the concatenated fz/c3 arrays. Trials record both the local sample
@@ -561,7 +594,7 @@ def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[in
           selection, later phase) must disambiguate.
     """
     if not markers:
-        return []
+        return [], []
 
     # Cluster by global-time gap
     clusters: List[List[Marker]] = [[]]
@@ -593,10 +626,13 @@ def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[in
 
     trials: List[Trial] = []
     trial_num = 0
+    cluster_meta: List[dict] = []
 
-    for cl in clusters:
+    for c_idx, cl in enumerate(clusters):
         block = cluster_block[id(cl)]
         block_trial = 0
+        n_con_in_cluster = 0
+        n_inc_in_cluster = 0
         for i, m in enumerate(cl):
             if m.label not in ONSET_LABELS:
                 continue
@@ -618,6 +654,10 @@ def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[in
 
             trial_num += 1
             block_trial += 1
+            if m.label == "con":
+                n_con_in_cluster += 1
+            elif m.label == "first":
+                n_inc_in_cluster += 1
             concat_offset = (
                 segment_concat_offsets[m.segment_index]
                 if segment_concat_offsets is not None and m.segment_index < len(segment_concat_offsets)
@@ -638,4 +678,16 @@ def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[in
                 )
             )
 
-    return trials
+        cluster_meta.append({
+            "index": c_idx,
+            "assigned_block": block,
+            "n_trials": block_trial,
+            "n_con": n_con_in_cluster,
+            "n_inc": n_inc_in_cluster,
+            "t_start_global": cl[0].time_global if cl else 0.0,
+            "t_end_global": cl[-1].time_global if cl else 0.0,
+            "has_second": _cluster_has_second(cl),
+            "has_end": any(END_TOKEN_RE.match(m.label) or m.label.strip().lower() == "end" for m in cl),
+        })
+
+    return trials, cluster_meta

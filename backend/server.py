@@ -49,6 +49,10 @@ from behavioural import (
     parse_behavioural_session, align_block,
 )
 from checks import run_subject_checks, checks_to_payload
+from logging_setup import get_logger, configure_logging
+
+configure_logging()
+logger = get_logger(__name__)
 
 
 app = FastAPI(title="EEG Flanker Analysis")
@@ -253,21 +257,30 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
     response shape is identical to the previous version.
     """
     if not files:
+        logger.warning("upload_eeg called with no files")
         raise HTTPException(400, "No files uploaded.")
+    logger.info(
+        "upload_eeg received %d file(s): %s",
+        len(files),
+        ", ".join(f.filename for f in files),
+    )
     for f in files:
         if not f.filename.lower().endswith(".txt"):
+            logger.warning("upload_eeg rejected non-.txt file: %s", f.filename)
             raise HTTPException(400, f"{f.filename}: only .txt LabChart exports are accepted")
 
     # Resolve subject IDs and require all files in one request to agree.
     parsed_names = [parse_upload_filename(f.filename) for f in files]
     sids = {p.subject_id for p in parsed_names}
     if len(sids) > 1:
+        logger.warning("upload_eeg mixed subject IDs: %s", sorted(sids))
         raise HTTPException(
             400,
             f"Files in one upload must share a subject ID; got {sorted(sids)}. "
             "Upload each subject's files as a separate request.",
         )
     subject_id = parsed_names[0].subject_id
+    logger.info("upload_eeg subject_id resolved to %s", subject_id)
 
     # Order: part 1 → 2 → unknown; alphabetical tiebreak.
     ordered = sorted(
@@ -283,14 +296,40 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
             with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="wb") as tmp:
                 tmp.write(content)
                 tmp_paths.append(tmp.name)
+        logger.debug("upload_eeg wrote %d temp file(s): %s", len(tmp_paths), tmp_paths)
 
-        parsed = parse_labchart_multi(tmp_paths)
+        try:
+            parsed = parse_labchart_multi(tmp_paths)
+        except Exception:
+            logger.exception("parse_labchart_multi failed for %s", subject_id)
+            raise HTTPException(422, f"{subject_id}: failed to parse LabChart file(s). See server log for details.")
         parsed.filename = subject_id
+        logger.info(
+            "%s parsed: %d segments, %d markers, %d trials, %d cluster(s)",
+            subject_id,
+            len(parsed.segments),
+            len(parsed.markers),
+            len(parsed.trials),
+            len(parsed.cluster_meta),
+        )
+        if parsed.warnings:
+            for w in parsed.warnings:
+                logger.warning("%s parser warning: %s", subject_id, w)
 
-        result = run_pipeline(parsed)
+        try:
+            result = run_pipeline(parsed)
+        except Exception:
+            logger.exception("run_pipeline failed for %s", subject_id)
+            raise HTTPException(500, f"{subject_id}: analysis pipeline failed. See server log for details.")
         result_id = subject_id
         _results[result_id] = result
         _parsed[result_id] = parsed
+        logger.info(
+            "%s pipeline OK: theta_surv=%d beta_surv=%d",
+            result_id,
+            result.theta_summary.surviving,
+            result.beta_summary.surviving,
+        )
 
         # If behavioural data was pre-loaded under a placeholder subject_id
         # (i.e. the CSV filename lacked S<n>P<nn> so we keyed by "?PNNN"
@@ -299,6 +338,10 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
         if eeg_ids is not None:
             placeholder = f"?P{eeg_ids[1]:03d}"
             if placeholder in _behavioural and placeholder != result_id:
+                logger.info(
+                    "reconciling placeholder behavioural %s -> %s",
+                    placeholder, result_id,
+                )
                 _behavioural[result_id] = _behavioural.pop(placeholder)
                 _alignment.pop(placeholder, None)
 
@@ -321,6 +364,7 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("upload_eeg unexpected failure for %s", subject_id if 'subject_id' in dir() else '<unknown>')
         raise HTTPException(500, f"Processing error: {e}")
     finally:
         for p in tmp_paths:
@@ -368,14 +412,17 @@ async def upload_demographics(file: UploadFile = File(...)):
     now have a matching demographic record.
     """
     global _demographics, _demographics_source
+    logger.info("upload_demographics received: %s", file.filename)
     raw = await file.read()
     try:
         demos = parse_demographics(raw)
     except Exception as exc:
+        logger.exception("parse_demographics failed for %s", file.filename)
         raise HTTPException(400, f"Could not parse demographics CSV: {exc}")
 
     _demographics = demos
     _demographics_source = file.filename or "demographics.csv"
+    logger.info("demographics: loaded %d participant row(s)", len(demos))
 
     # Report matching against currently uploaded EEG files
     matches = []
@@ -384,6 +431,7 @@ async def upload_demographics(file: UploadFile = File(...)):
         ids = parse_filename_ids(r.filename)
         m = match_demographics(r.filename, demos) if ids else None
         (matches if m else unmatched).append({"result_id": rid, "filename": r.filename})
+    logger.info("demographics: matched %d / unmatched %d subject(s)", len(matches), len(unmatched))
 
     return {
         "status": "success",
@@ -453,11 +501,27 @@ def _checks_payload_for(subject_id: str) -> List[dict]:
     alignments = _alignment.get(subject_id, [])
     session = _behavioural.get(subject_id)
     demo = match_demographics(subject_id, _demographics) if _demographics else None
-    checks = run_subject_checks(
-        parsed, result,
-        alignments=alignments,
-        beh_session=session,
-        demographic=demo,
+    try:
+        checks = run_subject_checks(
+            parsed, result,
+            alignments=alignments,
+            beh_session=session,
+            demographic=demo,
+        )
+    except Exception:
+        logger.exception("run_subject_checks failed for %s", subject_id)
+        return [{
+            "code": "X001",
+            "level": "HALT",
+            "message": "Validity checks crashed — see server log.",
+            "context": {},
+        }]
+    counts = {"HALT": 0, "WARN": 0, "INFO": 0}
+    for c in checks:
+        counts[c.level] = counts.get(c.level, 0) + 1
+    logger.info(
+        "checks for %s: %d HALT, %d WARN, %d INFO",
+        subject_id, counts.get("HALT", 0), counts.get("WARN", 0), counts.get("INFO", 0),
     )
     return checks_to_payload(checks)
 
@@ -559,12 +623,29 @@ def _run_alignment(subject_id: str) -> List[AlignmentResult]:
     blocks = sorted({t.block for t in result.trials})
     for blk in blocks:
         eeg_block = [t for t in result.trials if t.block == blk]
-        per_block.append(align_block(
-            eeg_rts_ms=[t.rt_ms for t in eeg_block],
-            eeg_congruent=[t.cond == "con" for t in eeg_block],
-            beh_trials=session.trials,
-            block=blk,
-        ))
+        try:
+            ar = align_block(
+                eeg_rts_ms=[t.rt_ms for t in eeg_block],
+                eeg_congruent=[t.cond == "con" for t in eeg_block],
+                beh_trials=session.trials,
+                block=blk,
+            )
+        except Exception:
+            logger.exception(
+                "align_block failed for subject=%s block=%d (eeg=%d, beh=%d)",
+                subject_id, blk, len(eeg_block),
+                sum(1 for t in session.trials if t.block == blk),
+            )
+            continue
+        per_block.append(ar)
+        logger.info(
+            "aligned %s blk%d: matched=%d r=%.4f cong=%.2f offset=%.1fms",
+            subject_id, blk,
+            len(ar.matched_pairs),
+            ar.rt_correlation,
+            ar.congruency_agreement,
+            ar.eeg_offset_ms,
+        )
     _alignment[subject_id] = per_block
     return per_block
 
@@ -584,9 +665,16 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
     and alignment is deferred until the EEG arrives.
     """
     if not files:
+        logger.warning("upload_behavioural called with no files")
         raise HTTPException(400, "No files uploaded.")
+    logger.info(
+        "upload_behavioural received %d file(s): %s",
+        len(files),
+        ", ".join(f.filename for f in files),
+    )
     for f in files:
         if not f.filename.lower().endswith(".csv"):
+            logger.warning("upload_behavioural rejected non-.csv file: %s", f.filename)
             raise HTTPException(400, f"{f.filename}: only .csv behavioural files are accepted")
 
     parsed_names = [parse_upload_filename(f.filename) for f in files]
@@ -598,6 +686,10 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
         if re.match(r"^S\d+P\d+$", p.subject_id)
     }
     if len(sids_from_filename) > 1:
+        logger.warning(
+            "upload_behavioural mixed subject IDs: %s",
+            sorted(sids_from_filename),
+        )
         raise HTTPException(
             400,
             f"Behavioural files in one upload must share a subject ID; "
@@ -617,7 +709,21 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
     try:
         session = parse_behavioural_session(file_bytes)
     except ValueError as e:
+        logger.warning("parse_behavioural_session rejected upload: %s", e)
         raise HTTPException(400, str(e))
+    except Exception:
+        logger.exception("parse_behavioural_session unexpected failure")
+        raise HTTPException(500, "Failed to parse behavioural CSV — see server log.")
+
+    logger.info(
+        "behavioural parsed: subject_nr=%s trials=%d variants=%s",
+        session.subject_nr,
+        len(session.trials),
+        [f.variant for f in session.files],
+    )
+    if session.warnings:
+        for w in session.warnings:
+            logger.warning("behavioural warning: %s", w)
 
     # Resolve the final subject_id. Priority order:
     #   1. S<n>P<nn> code found in any of the uploaded filenames.
@@ -634,6 +740,9 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
                 break
     if subject_id is None:
         subject_id = f"?P{session.subject_nr:03d}"
+        logger.info("behavioural: no matching EEG loaded, using placeholder %s", subject_id)
+    else:
+        logger.info("behavioural: resolved subject_id=%s", subject_id)
 
     _behavioural[subject_id] = session
     alignment = _run_alignment(subject_id)

@@ -22,6 +22,9 @@ import mne
 import pywt
 
 from parser import ParsedEEG, Trial
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 mne.set_log_level("ERROR")
 
