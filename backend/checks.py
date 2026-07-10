@@ -322,7 +322,123 @@ def check_signal_scoped(parsed: ParsedEEG, result: PipelineResult) -> List[Check
     return checks
 
 
-# ── J-family: EEG↔behavioural join ─────────────────────────────────────────
+# ── S-family (extended): contamination + blink adequacy (work-order Task 8) ──
+# S005/S006 are scaffolded as INFO-only: they PRINT the measured value but do
+# NOT fire WARN or drive channel exclusion, because their thresholds are
+# calibrated to a spectral method that differs from this pipeline's wavelet
+# basis (S1P002 measures 38% beta share here vs the doc's 15% on clean files)
+# and cannot be pinned without the real fixtures (S1P001/S2P003/S2P005). Once
+# those arrive, promote them to WARN + apply_channel_exclusion(). S007 (missed
+# small blinks) and C006 (amplitude outlier) ARE calibratable now.
+BLINK_NEAR_ZERO = 2        # "≈ 0 trials" flagged as blinks
+S007_MARGIN = 3.0          # slow-band deflections exceed noise floor by K·MAD
+S007_MIN_EVENTS = 3        # ... on at least this many trials -> blinks present
+
+
+def check_contamination(parsed: ParsedEEG, result: PipelineResult) -> List[Check]:
+    """S005/S006 (INFO-only for now) + S007 (missed small blinks)."""
+    checks: List[Check] = []
+    if not parsed.trials:
+        return checks
+
+    # ── S005 — C3-C4 beta-band / broadband EMG contamination (INFO-only) ──
+    # Measured on the pipeline's own wavelet basis, scoped to analysed epochs.
+    beta_share = getattr(result, "c3_beta_share", 0.0)
+    high_share = getattr(result, "c3_high_share", 0.0)
+    checks.append(Check(
+        "S005", INFO,
+        f"C3-C4 spectral shape: beta(13-30 Hz)={beta_share*100:.1f}%, "
+        f"high(30-35 Hz)={high_share*100:.1f}% of total. "
+        f"(threshold calibration pending real fixtures — not yet enforced)",
+        {"beta_share": round(beta_share, 4), "high_share": round(high_share, 4),
+         "enforced": False},
+    ))
+
+    # ── S006 — 50 Hz mains session-anomaly (INFO-only) ──
+    # The wavelet TOTAL_BAND caps at 35 Hz, so the 48-52 Hz mains band is not
+    # available from result. Compute it here from the analysed epochs via a
+    # periodogram on the (high-passed only) C3 signal — a separate path that
+    # does NOT re-notch (hard: the pipeline must not clean the residual, or it
+    # would hide the very failure S006 exists to catch).
+    mains_ratio = _mains_ratio_c3(parsed)
+    checks.append(Check(
+        "S006", INFO,
+        f"C3-C4 50 Hz-band (48-52 Hz) share = {mains_ratio:.3f} of 1-40 Hz total. "
+        f"(session-anomaly flag; threshold calibration pending real fixtures — "
+        f"not yet enforced)",
+        {"mains_ratio": round(mains_ratio, 4), "enforced": False},
+    ))
+
+    # ── S007 — missed small blinks (calibratable now) ──
+    # Distinguish a genuinely low-blink recording (fine) from one whose small
+    # blinks fall under the rejection cutoff (not fine). Both show "few blinks
+    # caught"; only the second has blink-shaped slow-band events sitting
+    # clearly above the recording's own slow-band noise floor.
+    slow = np.asarray(getattr(parsed, "blink_slow_ptp", []), dtype=float)
+    n_blinks = sum(1 for t in result.trials if getattr(t, "blink", False))
+    if slow.size:
+        med = float(np.median(slow))
+        mad = float(np.median(np.abs(slow - med)))
+        noise_floor = med + S007_MARGIN * mad
+        thr = getattr(parsed, "blink_threshold_uv", 0.0)
+        # blink-shaped events: above the noise floor but UNDER the rejection cut
+        n_events = int(((slow > noise_floor) & (slow <= thr)).sum())
+        if n_blinks <= BLINK_NEAR_ZERO and n_events >= S007_MIN_EVENTS:
+            checks.append(Check(
+                "S007", WARN,
+                f"Blink rejection caught {n_blinks} trial(s), but {n_events} "
+                f"blink-shaped slow-band event(s) sit above the noise floor "
+                f"({noise_floor:.0f} µV) and under the rejection cut "
+                f"({thr:.0f} µV) — small blinks likely missed.",
+                {"n_blinks": n_blinks, "n_missed_events": n_events,
+                 "noise_floor_uv": round(noise_floor, 1), "cut_uv": round(thr, 1)},
+            ))
+        else:
+            checks.append(Check(
+                "S007", INFO,
+                f"Blink adequacy: {n_blinks} caught, {n_events} sub-threshold "
+                f"blink-shaped event(s) — "
+                f"{'genuinely low-blink' if n_events < S007_MIN_EVENTS else 'ok'}.",
+                {"n_blinks": n_blinks, "n_missed_events": n_events},
+            ))
+    return checks
+
+
+def _mains_ratio_c3(parsed: ParsedEEG) -> float:
+    """48-52 Hz ÷ 1-40 Hz power on C3, averaged over analysed epochs.
+
+    Uses a periodogram on the raw (un-notched) C3 signal per trial. Returns 0
+    if the sampling rate cannot resolve 52 Hz or there are no usable epochs.
+    """
+    try:
+        from scipy import signal as _sig
+    except Exception:
+        return 0.0
+    fs = parsed.sampling_rate
+    if fs < 2 * 52:  # Nyquist below the mains band
+        return 0.0
+    c3 = np.asarray(parsed.c3, dtype=float)
+    n = len(c3)
+    w = int(round(EPOCH_TOTAL_S * fs))
+    acc = None
+    cnt = 0
+    for t in parsed.trials:
+        lo = t.onset_sample_concat
+        hi = lo + w
+        if lo < 0 or hi > n:
+            continue
+        seg = c3[lo:hi]
+        if not np.isfinite(seg).all():
+            continue
+        f, pxx = _sig.periodogram(seg - seg.mean(), fs)
+        acc = pxx if acc is None else acc + pxx
+        cnt += 1
+    if acc is None or cnt == 0:
+        return 0.0
+    psd = acc / cnt
+    total = psd[(f >= 1) & (f < 40)].sum()
+    mains = psd[(f >= 48) & (f <= 52)].sum()
+    return float(mains / total) if total > 0 else 0.0
 def check_alignment(alignments: Sequence[AlignmentResult]) -> List[Check]:
     checks: List[Check] = []
     for a in alignments:
@@ -417,6 +533,7 @@ def run_subject_checks(
     all_checks.extend(check_markers(parsed))
     all_checks.extend(check_trials(parsed))
     all_checks.extend(check_signal_scoped(parsed, result))
+    all_checks.extend(check_contamination(parsed, result))
     if alignments:
         all_checks.extend(check_alignment(alignments))
     # D-family: run only when demographics are available. Absence of a
@@ -434,3 +551,56 @@ def checks_to_payload(checks: Iterable[Check]) -> List[dict]:
         {"code": c.code, "level": c.level, "message": c.message, "context": c.context}
         for c in checks
     ]
+
+
+# ── C-family: cohort-level checks (work-order Task 8: C006) ─────────────────
+C006_SD = 2.0  # a recording > this many SD from the cohort median ptp is flagged
+
+
+def check_cohort_amplitude(fz_ptp_by_subject: dict) -> List[Check]:
+    """C006 — amplitude-scale outlier.
+
+    An outlying Fz-Pz peak-to-peak scale is the root cause of absolute-threshold
+    failure (it is why S1P002 at ~23 µV is dangerous to calibrate on). Flags any
+    recording whose median Fz-Pz ptp is > C006_SD SD from the cohort median.
+
+    `fz_ptp_by_subject`: {subject_id: median_fz_ptp_uv}. Needs >= 3 subjects to
+    have a meaningful spread; returns an INFO note otherwise.
+    """
+    checks: List[Check] = []
+    items = [(s, v) for s, v in fz_ptp_by_subject.items() if v and np.isfinite(v)]
+    if len(items) < 3:
+        checks.append(Check(
+            "C006", INFO,
+            f"Amplitude-scale outlier check needs ≥3 recordings; have {len(items)}.",
+            {"n": len(items)},
+        ))
+        return checks
+    vals = np.array([v for _, v in items], dtype=float)
+    med = float(np.median(vals))
+    sd = float(np.std(vals, ddof=1))
+    if sd == 0:
+        checks.append(Check("C006", INFO, "All recordings share one amplitude scale.", {}))
+        return checks
+    flagged = []
+    for s, v in items:
+        z = (v - med) / sd
+        if abs(z) > C006_SD:
+            flagged.append((s, v, z))
+    if flagged:
+        for s, v, z in flagged:
+            checks.append(Check(
+                "C006", WARN,
+                f"{s}: median Fz-Pz ptp {v:.1f} µV is {z:+.1f} SD from the cohort "
+                f"median ({med:.1f} µV) — amplitude-scale outlier.",
+                {"subject": s, "fz_ptp_uv": round(v, 1), "z": round(z, 2),
+                 "cohort_median": round(med, 1)},
+            ))
+    else:
+        checks.append(Check(
+            "C006", INFO,
+            f"No amplitude-scale outliers: cohort median Fz-Pz ptp {med:.1f} µV, "
+            f"SD {sd:.1f} µV over {len(items)} recordings.",
+            {"cohort_median": round(med, 1), "cohort_sd": round(sd, 1), "n": len(items)},
+        ))
+    return checks

@@ -183,6 +183,9 @@ class PipelineResult:
     # C3-C4 spectral-shape metrics over analysed epochs (Task 8 / S005 inputs).
     c3_beta_share: float = 0.0        # 13-30 Hz ÷ total
     c3_high_share: float = 0.0        # 30-TOTAL_BAND[1] Hz ÷ total
+    # Median Fz-Pz peak-to-peak (µV) over analysed epochs — the amplitude-scale
+    # descriptor the cohort-level C006 outlier check compares across recordings.
+    fz_ptp_median: float = 0.0
     # Adaptive-threshold values this recording used (for QC display).
     blink_threshold_uv: float = 0.0
     emg_threshold: float = 0.0
@@ -523,6 +526,7 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
         beta_spec_all=beta_spec,
         c3_beta_share=c3_beta_share,
         c3_high_share=c3_high_share,
+        fz_ptp_median=float(np.median(fz_ptp)) if len(fz_ptp) else 0.0,
         blink_threshold_uv=blink_thresh,
         emg_threshold=emg_thresh,
     )

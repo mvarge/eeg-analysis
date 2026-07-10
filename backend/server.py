@@ -49,7 +49,7 @@ from behavioural import (
     parse_behavioural_session, align_block,
 )
 from merge import select_blocks
-from checks import run_subject_checks, checks_to_payload
+from checks import run_subject_checks, checks_to_payload, check_cohort_amplitude
 from logging_setup import get_logger, configure_logging
 
 configure_logging()
@@ -570,7 +570,20 @@ def _checks_payload_for(subject_id: str) -> List[dict]:
         {"code": code, "level": level, "message": msg, "context": {}}
         for code, level, msg in block_codes
     ]
-    return b_payload + payload
+    # Append the cohort-level C006 amplitude-outlier check (Task 8). It needs
+    # every currently-loaded recording's median Fz-Pz ptp; the result for THIS
+    # subject is filtered out of the returned list (only its own row is shown).
+    fz_by_subject = {
+        sid: getattr(r, "fz_ptp_median", 0.0) for sid, r in _results.items()
+    }
+    cohort_checks = check_cohort_amplitude(fz_by_subject)
+    c006_payload = [
+        {"code": c.code, "level": c.level, "message": c.message, "context": c.context}
+        for c in cohort_checks
+        # keep C006 rows relevant to this subject, plus the cohort INFO summary
+        if c.context.get("subject") in (None, subject_id) or "cohort_median" in c.context
+    ]
+    return b_payload + payload + c006_payload
 
 
 def _accuracy_payload(subject_id: str) -> List[dict]:
