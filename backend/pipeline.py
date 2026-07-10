@@ -181,8 +181,12 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
     T_axis = raw_hp.times
 
     # ---- STAGE 4: build events + Epochs (window + padding) ----------------
+    # NB: use the concatenated sample index (segment-aware), not `t.onset * fs`.
+    # For single-segment files the two are identical; for multi-segment files
+    # (recording restart), only the concatenated index maps correctly into the
+    # stacked fz/c3 arrays. See parser.Trial.onset_sample_concat.
     events = np.column_stack([
-        np.round(np.array([t.onset for t in trials_meta]) * fs).astype(int),
+        np.array([t.onset_sample_concat for t in trials_meta], dtype=int),
         np.zeros(len(trials_meta), int),
         np.array([1 if t.cond == "con" else 2 for t in trials_meta]),
     ])

@@ -1,234 +1,613 @@
 """
-LabChart EEG text export parser.
+LabChart EEG text export parser (segment-aware).
 
-Matches the reference pipeline (pipeline_stages_1to6.py from EEG_analysis V.zip):
-  - latin-1 encoding
-  - skip 6 header lines (the LabChart preamble)
-  - two channels: Fz-Pz (theta) and C3-C4 (beta)
-  - marker table with block-gap detection (>30s = new block)
-  - trial pairing: each `con` / `first` onset is paired with the next `key`;
-    orphan `first` markers at block boundaries are dropped.
+Handles both clean recordings (one 6-line header, then data) and pathological
+files where the recording was stopped and restarted mid-experiment — LabChart
+writes a fresh 6-line header at the join and the sample clock restarts at 0.
 
-Header parsing is best-effort — the reference script ignores the header entirely
-and always uses FS=400 Hz, but we surface `sampling_rate`, `recording_date`,
-and channel names from the header where present so the UI can show them.
+Key behaviours mandated by docs/DATA_REFERENCE.md:
+
+  * latin-1 encoding, CRLF line endings, tab-delimited data.
+  * A file is a SEQUENCE OF SEGMENTS. Each segment starts with a 6-line
+    header. Data rows within a segment carry `time` relative to that
+    segment's t=0.
+  * Header parsing is case-insensitive and whitespace-tolerant. Channel
+    names may appear as `EEG Fz-Pz` in one header and `EEG FZ-PZ` in
+    another within the same file — both are matched.
+  * A global timeline is reconstructed from each segment's ExcelDateTime
+    (Excel serial, days since 1899-12-30). Per-segment monotonicity is
+    verified. Across-segment time is derived, never taken from the
+    per-segment `time` column.
+  * Markers keep their global time (for cross-segment reasoning) and
+    per-segment sample index (for slicing the correct segment's array).
+  * The `first` marker is overloaded (incongruent onset + block-1
+    boundary). Trial pairing uses "onset followed by `key` before the
+    next onset marker", NEVER positional heuristics.
+  * Blocks are identified by the `second`-marker rule primarily, with
+    the >30 s marker-gap rule as fallback for files without any
+    `second` marker (block-1-only recordings).
+
+Regression-tested against:
+  * S1P002 clean single-segment file → 160 trials (80/80).
+  * Simulated block-1-only truncation → 80 trials (40/40), NOT 81.
+  * Simulated multi-header file → correct global timeline; per-segment
+    monotonicity holds; no block-detection false positive from the
+    -327s negative "gap" at the join.
 """
 
+from __future__ import annotations
+
 import re
-import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from datetime import datetime, timedelta
+from io import StringIO
+from typing import List, Optional, Tuple
+
+import numpy as np
 
 
-BLOCK_GAP_S = 30.0   # marker gap that separates the two blocks
-HEADER_LINES = 6     # LabChart 8 export preamble
+# ── Constants ──────────────────────────────────────────────────────────────
+BLOCK_GAP_S = 30.0                 # marker gap that separates the two blocks
+EXCEL_EPOCH = datetime(1899, 12, 30)  # Excel's day-0 (accounts for 1900 leap-year bug)
+
+# Expected channel names, normalised (lowercase, whitespace collapsed, "EEG " prefix stripped)
+EXPECTED_CH_NORMS = ("fz-pz", "c3-c4")
+
+# Real trial onsets and boundary onsets both use these labels
+ONSET_LABELS = ("con", "first")
+RESPONSE_LABEL = "key"
+BLOCK2_LABEL = "second"
+END_TOKEN_RE = re.compile(r"^\**\s*END\s*\**$", re.IGNORECASE)
+
+
+# ── Data classes ───────────────────────────────────────────────────────────
+@dataclass
+class SegmentHeader:
+    """The parsed contents of one 6-line LabChart header."""
+    interval_s: float                     # sample interval in seconds
+    sampling_rate: float                  # 1/interval_s
+    excel_datetime: Optional[float]       # Excel serial (days since 1899-12-30), or None if unparseable
+    date_text: str                        # human-readable date string from the header
+    time_format: str                      # e.g. "StartOfBlock"
+    date_format: str
+    channel_names_raw: List[str]          # exactly as they appear in the file
+    range_text: List[str]                 # exactly as they appear (info only; data are always µV)
+    line_start: int                       # 0-indexed file line number where "Interval=" appears
+    line_end: int                         # 0-indexed file line number of last header line (inclusive)
+
+
+@dataclass
+class Segment:
+    """One contiguous recording block (bounded by headers or file end)."""
+    index: int                            # 0-based segment index within the file
+    header: SegmentHeader
+    fz: np.ndarray                        # shape (n_samples,), µV
+    c3: np.ndarray                        # shape (n_samples,), µV
+    local_time: np.ndarray                # shape (n_samples,), seconds relative to segment start
+    markers: List["Marker"] = field(default_factory=list)
+    time_start_global: float = 0.0        # seconds since first segment's ExcelDateTime start
+    monotonic: bool = True                # False if per-segment time is NOT strictly increasing
+    uniform_interval: bool = True         # False if any diff(time) deviates by >5% from interval_s
+
+    @property
+    def sample_count(self) -> int:
+        return self.fz.shape[0]
+
+    @property
+    def duration_s(self) -> float:
+        return self.local_time[-1] - self.local_time[0] if self.sample_count else 0.0
 
 
 @dataclass
 class Marker:
-    """A single event marker from the recording."""
-    time_seconds: float
-    sample_index: int
-    label: str        # raw label: 'con', 'first', 'key', 'second', etc.
+    """A single event marker from the recording (with both local and global time)."""
+    label: str                            # 'con', 'first', 'key', 'second', 'END', ...
+    segment_index: int                    # which segment this marker belongs to
+    sample_index_local: int               # index into that segment's fz/c3 arrays
+    time_local: float                     # seconds within its segment (starts at 0 per segment)
+    time_global: float                    # seconds since first segment's ExcelDateTime start
+    raw_comment: str                      # unmodified comment field, for diagnostics
 
 
 @dataclass
 class Trial:
-    """A single trial: stimulus onset paired with response key."""
-    trial: int         # 1..N across the whole recording
-    btrial: int        # 1..N within its block
-    block: int         # 1 or 2
-    cond: str          # 'con' (congruent) or 'first' (incongruent)
-    onset: float       # stimulus onset time (s)
-    key: float         # response key time (s)
-    rt_ms: int         # reaction time in ms
-    onset_sample: int  # sample index of onset
+    """A stimulus onset paired with the participant's response."""
+    trial: int                            # 1-based, across the whole recording
+    btrial: int                           # 1-based, within its block
+    block: int                            # 1 or 2 (rarely more if aborted/restarted; caller must decide)
+    cond: str                             # 'con' or 'first'
+    onset: float                          # global time (s) of the onset marker
+    key: float                            # global time (s) of the paired `key`
+    rt_ms: int                            # (key - onset) * 1000, rounded
+    segment_index: int                    # segment the onset lives in
+    onset_sample_local: int               # sample index of onset within its segment
+    onset_sample_concat: int              # sample index of onset in the CONCATENATED fz/c3 arrays
 
 
 @dataclass
 class ParsedEEG:
-    """Complete parsed result from a LabChart file."""
+    """Complete parsed result from a LabChart file.
+
+    Backwards-compatible attributes (fz, c3, markers, trials, n_blocks,
+    sampling_rate, recording_date, channel_names, filename) are exposed at
+    the top level. Multi-segment metadata lives in `segments`.
+    """
     filename: str
     recording_date: str
     sampling_rate: float
-    channel_names: List[str]
-    fz: np.ndarray            # Fz-Pz (µV)
-    c3: np.ndarray            # C3-C4 (µV)
-    markers: List[Marker]     # all markers
-    trials: List[Trial]       # paired trials only
-    n_blocks: int             # detected from marker gaps
+    channel_names: List[str]              # normalised, from the FIRST segment header
+    fz: np.ndarray                        # concatenation of all segments' fz (in file order)
+    c3: np.ndarray                        # concatenation of all segments' c3
+    markers: List[Marker]                 # all markers, in the order they appear
+    trials: List[Trial]                   # paired trials only
+    n_blocks: int                         # 1 or 2 (occasionally more before segment selection)
+    segments: List[Segment]               # per-segment detail
+    # Byte-for-byte diagnostics available on request
+    warnings: List[str] = field(default_factory=list)
+
+    @property
+    def n_segments(self) -> int:
+        return len(self.segments)
 
 
-def _parse_header(filepath: str) -> Tuple[float, str, List[str]]:
-    """Best-effort extraction of sampling rate, date, channel names from header."""
-    sampling_rate = 400.0
-    recording_date = "Unknown"
-    channel_names = ["Fz-Pz", "C3-C4"]
+# ── Utility ────────────────────────────────────────────────────────────────
+def _normalise_channel_name(raw: str) -> str:
+    """Normalise a channel-title cell to a canonical key.
 
-    with open(filepath, "r", encoding="latin-1") as fh:
-        for i, line in enumerate(fh):
-            if i >= HEADER_LINES:
-                break
-            stripped = line.strip()
+    Strips optional 'EEG ' prefix, collapses whitespace, lowercases.
+    'EEG Fz-Pz ' → 'fz-pz'; 'EEG FZ-PZ' → 'fz-pz'.
+    """
+    s = raw.strip()
+    if s.lower().startswith("eeg "):
+        s = s[4:]
+    return re.sub(r"\s+", "", s).lower()
 
-            if stripped.startswith("Interval="):
-                parts = stripped.split("\t")
-                if len(parts) >= 2:
-                    try:
-                        interval_str = parts[1].strip().replace(" s", "")
-                        sampling_rate = 1.0 / float(interval_str)
-                    except (ValueError, ZeroDivisionError):
-                        pass
 
-            elif stripped.startswith("ExcelDateTime="):
-                parts = stripped.split("\t")
-                if len(parts) >= 3:
-                    recording_date = parts[2].strip()
-
-            elif stripped.startswith("ChannelTitle="):
-                parts = stripped.split("\t")
-                names = [p.strip() for p in parts[1:] if p.strip()]
-                if names:
-                    channel_names = names[:2] + ["Fz-Pz", "C3-C4"][len(names):]
-
-    return sampling_rate, recording_date, channel_names
+def _excel_serial_to_datetime(serial: float) -> datetime:
+    """Excel serial (days since 1899-12-30) → Python datetime."""
+    return EXCEL_EPOCH + timedelta(days=serial)
 
 
 def _extract_marker_label(comment: str) -> str:
-    """Extract the marker's short label from a LabChart comment field.
+    """Extract a marker's short label from a LabChart comment field.
 
-    LabChart comments look like: "#1 con"  or  "#1 key #2 con"  or just "con".
-    We take the label right after '#1' if present, otherwise the first token,
-    stripped of any trailing '#N' suffixes.
+    Comments look like:
+      "#1 con"
+      "#1 key #2 con"
+      "#1 ******** END ******** #2 ******** END ********"
+      "con"
+
+    Strategy: strip all "#N" prefix tokens, take the first non-empty run.
+    Special-case the END sentinel so callers see it as a single logical marker.
     """
-    text = comment.replace("#1", "").split("#")[0].strip().split()
-    if not text:
+    # Remove all "#<digits>" tokens.
+    cleaned = re.sub(r"#\d+", " ", comment).strip()
+    if not cleaned:
         return ""
-    return text[0]
+    # Check for END sentinel first (may be wrapped in asterisks/spaces)
+    if END_TOKEN_RE.match(cleaned) or "END" in cleaned.upper() and set(cleaned) <= set("* END\t "):
+        return "END"
+    # Take the first whitespace-delimited token
+    return cleaned.split()[0]
 
 
-def parse_labchart(filepath: str) -> ParsedEEG:
-    """Parse a LabChart 8 text export file.
+# ── Header parsing ─────────────────────────────────────────────────────────
+_HEADER_KEY_RE = re.compile(r"^([A-Za-z]+)=", )
 
-    Returns ParsedEEG with the two channels, marker table, and trial pairings.
+
+def _parse_one_header(lines: List[str], start: int) -> Tuple[Optional[SegmentHeader], int]:
+    """Parse a 6-line LabChart header starting at `lines[start]`.
+
+    Returns (header, next_line_index). Returns (None, start) if the block at
+    `start` doesn't look like a header.
+
+    LabChart headers always have this shape:
+        Interval=       <value>
+        ExcelDateTime=  <serial> <human_date>
+        TimeFormat=     <text>
+        DateFormat=     <text or empty>
+        ChannelTitle=   <name1> <name2>
+        Range=          <val1> <val2>
     """
-    # Extract filename (cross-platform)
-    filename = filepath.rsplit("/", 1)[-1]
-    filename = filename.rsplit("\\", 1)[-1]
+    if start + 6 > len(lines):
+        return None, start
+    # Must start with "Interval="
+    if not lines[start].lstrip().lower().startswith("interval="):
+        return None, start
 
-    sampling_rate, recording_date, channel_names = _parse_header(filepath)
+    header_lines = lines[start : start + 6]
+    kv = {}
+    for ln in header_lines:
+        m = _HEADER_KEY_RE.match(ln.lstrip())
+        if not m:
+            continue
+        key = m.group(1).lower()
+        parts = ln.rstrip("\r\n").split("\t")
+        # value tokens are everything after the "Key=" part
+        rest = parts[1:] if len(parts) > 1 else []
+        kv[key] = [p.strip() for p in rest]
 
-    # ---- STAGE 1: load samples + markers -----------------------------------
-    fz: List[float] = []
-    c3: List[float] = []
-    markers: List[Marker] = []
+    # Interval
+    interval_s = 0.0025  # default 400 Hz
+    if "interval" in kv and kv["interval"]:
+        try:
+            # value may be "0.0025 s" or "0.0025"
+            raw = kv["interval"][0].split()[0]
+            interval_s = float(raw)
+        except (ValueError, IndexError):
+            pass
+    sampling_rate = 1.0 / interval_s if interval_s > 0 else 400.0
 
-    with open(filepath, "r", encoding="latin-1") as fh:
-        for i, line in enumerate(fh):
-            if i < HEADER_LINES:
+    # ExcelDateTime
+    excel_dt = None
+    date_text = "Unknown"
+    if "exceldatetime" in kv and kv["exceldatetime"]:
+        try:
+            excel_dt = float(kv["exceldatetime"][0])
+        except ValueError:
+            excel_dt = None
+        if len(kv["exceldatetime"]) >= 2:
+            date_text = kv["exceldatetime"][1]
+
+    time_format = kv.get("timeformat", [""])[0] if kv.get("timeformat") else ""
+    date_format = kv.get("dateformat", [""])[0] if kv.get("dateformat") else ""
+
+    channel_names_raw = kv.get("channeltitle", [])
+    range_text = kv.get("range", [])
+
+    return (
+        SegmentHeader(
+            interval_s=interval_s,
+            sampling_rate=sampling_rate,
+            excel_datetime=excel_dt,
+            date_text=date_text,
+            time_format=time_format,
+            date_format=date_format,
+            channel_names_raw=channel_names_raw,
+            range_text=range_text,
+            line_start=start,
+            line_end=start + 5,
+        ),
+        start + 6,
+    )
+
+
+# ── Data-row parsing ───────────────────────────────────────────────────────
+def _parse_data_rows(
+    lines: List[str], start: int, end: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Tuple[int, float, str]]]:
+    """Parse a contiguous block of data rows (lines[start:end]).
+
+    Returns (time_arr, fz_arr, c3_arr, raw_markers) where raw_markers is a list of
+    (sample_index_local, time_local, raw_comment) tuples for rows with a comment.
+
+    Values that fail to parse as float (including the LabChart-emitted string "NaN")
+    are stored as np.nan. This mirrors what LabChart actually writes.
+    """
+    times: List[float] = []
+    fz_vals: List[float] = []
+    c3_vals: List[float] = []
+    raw_markers: List[Tuple[int, float, str]] = []
+
+    def _to_float(s: str) -> float:
+        s = s.strip()
+        if not s:
+            return np.nan
+        try:
+            return float(s)
+        except ValueError:
+            # LabChart writes literal "NaN" during amplifier saturation.
+            if s.lower() == "nan":
+                return np.nan
+            return np.nan
+
+    for ln in lines[start:end]:
+        # A line beginning with "Interval=" would be a new header — stop.
+        if ln.lstrip().lower().startswith("interval="):
+            break
+        parts = ln.rstrip("\r\n").split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            t = float(parts[0])
+        except ValueError:
+            # Not a data row at all; skip silently.
+            continue
+        a = _to_float(parts[1])
+        b = _to_float(parts[2])
+        idx = len(times)
+        times.append(t)
+        fz_vals.append(a)
+        c3_vals.append(b)
+        # 4th+ column is optional comment
+        if len(parts) >= 4:
+            comment = "\t".join(parts[3:]).strip()
+            if comment:
+                raw_markers.append((idx, t, comment))
+
+    return (
+        np.asarray(times, dtype=np.float64),
+        np.asarray(fz_vals, dtype=np.float64),
+        np.asarray(c3_vals, dtype=np.float64),
+        raw_markers,
+    )
+
+
+# ── Top-level ──────────────────────────────────────────────────────────────
+def parse_labchart(filepath: str) -> ParsedEEG:
+    """Parse a LabChart 8 text export.
+
+    Handles single-segment and multi-segment files. See module docstring.
+    """
+    filename = filepath.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+    with open(filepath, "r", encoding="latin-1", newline="") as fh:
+        # Read all lines; the file is small enough (S1P002 is ~65 MB but that's fine).
+        lines = fh.read().splitlines()
+
+    warnings: List[str] = []
+    segments: List[Segment] = []
+    first_excel_dt: Optional[float] = None
+
+    # Walk the file, alternating header → data-block → header → data-block …
+    i = 0
+    seg_index = 0
+    while i < len(lines):
+        # Skip any blank/whitespace-only lines between segments
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        if i >= len(lines):
+            break
+
+        # Try to parse a header at this position
+        header, after_header = _parse_one_header(lines, i)
+        if header is None:
+            # Not a header — if we haven't parsed any yet, that's a hard failure;
+            # if we already have segments, this is stray trailing text.
+            if not segments:
+                raise ValueError(
+                    f"No parseable LabChart header at line {i}. "
+                    "File is not a LabChart export, or the encoding is wrong."
+                )
+            break
+
+        # Find where the next header starts (or end of file)
+        next_header_line = len(lines)
+        for j in range(after_header, len(lines)):
+            if lines[j].lstrip().lower().startswith("interval="):
+                next_header_line = j
+                break
+
+        # Parse the data rows for this segment
+        time_arr, fz_arr, c3_arr, raw_markers = _parse_data_rows(
+            lines, after_header, next_header_line
+        )
+
+        # Track first segment's ExcelDateTime for global-time reconstruction
+        if first_excel_dt is None and header.excel_datetime is not None:
+            first_excel_dt = header.excel_datetime
+
+        # Compute this segment's start in the global timeline
+        if first_excel_dt is not None and header.excel_datetime is not None:
+            time_start_global = (header.excel_datetime - first_excel_dt) * 86400.0
+        else:
+            # Fallback: chain segments end-to-end (imperfect but non-catastrophic)
+            time_start_global = (
+                segments[-1].time_start_global + segments[-1].duration_s if segments else 0.0
+            )
+
+        # Per-segment sanity: monotonicity + uniform interval
+        monotonic = True
+        uniform_interval = True
+        if time_arr.size > 1:
+            diffs = np.diff(time_arr)
+            monotonic = bool(np.all(diffs > 0))
+            expected = header.interval_s
+            if expected > 0:
+                # allow 5% deviation before flagging
+                uniform_interval = bool(np.all(np.abs(diffs - expected) < 0.05 * expected))
+
+        if not monotonic:
+            warnings.append(
+                f"Segment {seg_index}: local time vector is NOT monotonic. "
+                "This will corrupt any bisect/searchsorted logic. "
+                "Check for corrupted/re-ordered rows."
+            )
+        if not uniform_interval:
+            warnings.append(
+                f"Segment {seg_index}: sample interval is not uniform "
+                f"(expected {header.interval_s:.4f} s). Possible dropped samples."
+            )
+
+        # Build marker list for this segment
+        segment_markers: List[Marker] = []
+        for sample_idx_local, t_local, comment in raw_markers:
+            label = _extract_marker_label(comment)
+            if not label:
                 continue
-            parts = line.rstrip("\r\n").split("\t")
-            if len(parts) < 3:
-                continue
-            try:
-                t = float(parts[0])
-                a = float(parts[1])
-                b = float(parts[2])
-            except ValueError:
-                continue
+            segment_markers.append(
+                Marker(
+                    label=label,
+                    segment_index=seg_index,
+                    sample_index_local=sample_idx_local,
+                    time_local=t_local,
+                    time_global=time_start_global + t_local,
+                    raw_comment=comment,
+                )
+            )
 
-            fz.append(a)
-            c3.append(b)
+        segments.append(
+            Segment(
+                index=seg_index,
+                header=header,
+                fz=fz_arr,
+                c3=c3_arr,
+                local_time=time_arr,
+                markers=segment_markers,
+                time_start_global=time_start_global,
+                monotonic=monotonic,
+                uniform_interval=uniform_interval,
+            )
+        )
 
-            # 4th+ column may hold a comment (marker)
-            if len(parts) >= 4 and parts[3].strip():
-                label = _extract_marker_label(parts[3])
-                if label:
-                    markers.append(Marker(
-                        time_seconds=t,
-                        sample_index=len(fz) - 1,
-                        label=label,
-                    ))
+        seg_index += 1
+        i = next_header_line
 
-    fz_arr = np.asarray(fz, dtype=np.float64)
-    c3_arr = np.asarray(c3, dtype=np.float64)
+    if not segments:
+        raise ValueError("File contains no parseable data segments.")
 
-    # ---- STAGE 2: block detection + trial pairing --------------------------
-    # Blocks are separated by marker gaps larger than BLOCK_GAP_S.
-    trials = _pair_trials(markers)
+    # ── Assemble top-level (concatenated) arrays and marker list ──────────
+    fz_all = np.concatenate([s.fz for s in segments]) if segments else np.zeros(0)
+    c3_all = np.concatenate([s.c3 for s in segments]) if segments else np.zeros(0)
 
-    # Count distinct blocks
+    # Sample-index offset of each segment within the concatenated array.
+    segment_concat_offsets: List[int] = []
+    running = 0
+    for s in segments:
+        segment_concat_offsets.append(running)
+        running += s.sample_count
+
+    all_markers: List[Marker] = []
+    for s in segments:
+        all_markers.extend(s.markers)
+    all_markers.sort(key=lambda m: (m.segment_index, m.time_local))
+
+    # Channel-name check (case-insensitive)
+    first_header = segments[0].header
+    ch_norms = [_normalise_channel_name(x) for x in first_header.channel_names_raw]
+    channel_names = list(first_header.channel_names_raw[:2]) or ["Fz-Pz", "C3-C4"]
+    if len(ch_norms) < 2 or ch_norms[0] != EXPECTED_CH_NORMS[0] or ch_norms[1] != EXPECTED_CH_NORMS[1]:
+        warnings.append(
+            f"Unexpected channel names (normalised): {ch_norms}. "
+            f"Expected {list(EXPECTED_CH_NORMS)}."
+        )
+
+    # Multi-header advisory
+    if len(segments) > 1:
+        warnings.append(
+            f"File contains {len(segments)} segments (recording was stopped and "
+            "restarted). Global timeline reconstructed from ExcelDateTime; "
+            "per-segment time vectors verified monotonic."
+        )
+
+    # ── Trial pairing ────────────────────────────────────────────────────
+    trials = _pair_trials(all_markers, segment_concat_offsets)
     n_blocks = len({t.block for t in trials}) if trials else 0
 
     return ParsedEEG(
         filename=filename,
-        recording_date=recording_date,
-        sampling_rate=sampling_rate,
+        recording_date=first_header.date_text,
+        sampling_rate=first_header.sampling_rate,
         channel_names=channel_names,
-        fz=fz_arr,
-        c3=c3_arr,
-        markers=markers,
+        fz=fz_all,
+        c3=c3_all,
+        markers=all_markers,
         trials=trials,
         n_blocks=n_blocks,
+        segments=segments,
+        warnings=warnings,
     )
 
 
-def _pair_trials(markers: List[Marker]) -> List[Trial]:
-    """Detect blocks and pair each con/first onset with the next key.
+# ── Trial pairing + block detection ────────────────────────────────────────
+def _pair_trials(markers: List[Marker], segment_concat_offsets: Optional[List[int]] = None) -> List[Trial]:
+    """Pair each stimulus onset (con/first) with the next `key` before the
+    next onset marker. Assign a block using the `second`-marker rule.
 
-    Follows the reference (pipeline_stages_1to6.py:63-88):
-      - split on marker gaps > BLOCK_GAP_S
-      - for each stimulus marker (con/first), find the next `key`
-      - if another stimulus marker comes before the key, it's an orphan
-        (block-boundary `first`) and is dropped.
+    `segment_concat_offsets[i]` is the sample-index offset of segment `i`
+    within the concatenated fz/c3 arrays. Trials record both the local sample
+    index (into their own segment) and the concatenated sample index
+    (into the flat parsed.fz/c3 arrays used downstream).
+
+    Rules (from docs/DATA_REFERENCE.md §3.5, §3.6):
+
+      * A real trial is: onset → key, with no other onset in between.
+        Boundary `first` markers fail this and are not counted.
+      * Block assignment:
+        - Split markers into clusters wherever consecutive marker times
+          differ by more than BLOCK_GAP_S (30 s) in GLOBAL time.
+        - If exactly two clusters exist, they are blocks 1 and 2.
+        - Otherwise: any cluster containing at least one `second` marker
+          is treated as block 2; the rest as block 1. If more than one
+          candidate remains for either block, the caller (segment
+          selection, later phase) must disambiguate.
     """
     if not markers:
         return []
 
-    times = np.array([m.time_seconds for m in markers])
-    gaps = np.where(np.diff(times) > BLOCK_GAP_S)[0]
+    # Cluster by global-time gap
+    clusters: List[List[Marker]] = [[]]
+    for m in markers:
+        if clusters[-1] and (m.time_global - clusters[-1][-1].time_global) > BLOCK_GAP_S:
+            clusters.append([])
+        clusters[-1].append(m)
 
-    # block start/end times (with a small buffer)
-    starts = [times[0]] + [times[i + 1] for i in gaps]
-    ends = [times[i] for i in gaps] + [times[-1]]
+    # Assign a block number to each cluster
+    def _cluster_has_second(cl: List[Marker]) -> bool:
+        return any(m.label == BLOCK2_LABEL for m in cl)
+
+    if len(clusters) == 2:
+        cluster_block = {id(clusters[0]): 1, id(clusters[1]): 2}
+    else:
+        # For each cluster, block = 2 if it has a `second`, else 1.
+        # This may produce multiple block-1 or block-2 candidates on
+        # aborted/restarted files; later segment selection will pick one.
+        cluster_block = {}
+        b1_idx = 0
+        b2_idx = 0
+        for cl in clusters:
+            if _cluster_has_second(cl):
+                b2_idx += 1
+                cluster_block[id(cl)] = 2 if b2_idx == 1 else 2  # keep as 2; disambiguation later
+            else:
+                b1_idx += 1
+                cluster_block[id(cl)] = 1
 
     trials: List[Trial] = []
     trial_num = 0
 
-    for block_idx, (t0, t1) in enumerate(zip(starts, ends), start=1):
-        seq = [m for m in markers if t0 - 0.5 <= m.time_seconds <= t1 + 0.5]
+    for cl in clusters:
+        block = cluster_block[id(cl)]
         block_trial = 0
+        for i, m in enumerate(cl):
+            if m.label not in ONSET_LABELS:
+                continue
+            # Find next key and next onset within this cluster
+            next_key = None
+            next_stim = None
+            for n in cl[i + 1 :]:
+                if n.label == RESPONSE_LABEL and next_key is None:
+                    next_key = n
+                if n.label in ONSET_LABELS and next_stim is None:
+                    next_stim = n
+                if next_key is not None and next_stim is not None:
+                    break
+            if next_key is None:
+                continue
+            if next_stim is not None and next_stim.time_global < next_key.time_global:
+                # Onset without a valid response → boundary marker or unresponded trial
+                continue
 
-        i = 0
-        while i < len(seq):
-            m = seq[i]
-            if m.label in ("con", "first"):
-                # find next key
-                next_key = None
-                next_stim = None
-                for j in range(i + 1, len(seq)):
-                    lab = seq[j].label
-                    if lab == "key" and next_key is None:
-                        next_key = seq[j]
-                    if lab in ("con", "first") and next_stim is None:
-                        next_stim = seq[j]
-                    if next_key is not None and next_stim is not None:
-                        break
-
-                # Only counts as a trial if a key comes before the next stimulus
-                if next_key is not None and (next_stim is None or next_key.time_seconds < next_stim.time_seconds):
-                    trial_num += 1
-                    block_trial += 1
-                    trials.append(Trial(
-                        trial=trial_num,
-                        btrial=block_trial,
-                        block=block_idx,
-                        cond=m.label,
-                        onset=m.time_seconds,
-                        key=next_key.time_seconds,
-                        rt_ms=int(round((next_key.time_seconds - m.time_seconds) * 1000)),
-                        onset_sample=m.sample_index,
-                    ))
-            i += 1
+            trial_num += 1
+            block_trial += 1
+            concat_offset = (
+                segment_concat_offsets[m.segment_index]
+                if segment_concat_offsets is not None and m.segment_index < len(segment_concat_offsets)
+                else 0
+            )
+            trials.append(
+                Trial(
+                    trial=trial_num,
+                    btrial=block_trial,
+                    block=block,
+                    cond=m.label,
+                    onset=m.time_global,
+                    key=next_key.time_global,
+                    rt_ms=int(round((next_key.time_global - m.time_global) * 1000)),
+                    segment_index=m.segment_index,
+                    onset_sample_local=m.sample_index_local,
+                    onset_sample_concat=concat_offset + m.sample_index_local,
+                )
+            )
 
     return trials
