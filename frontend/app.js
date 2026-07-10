@@ -409,6 +409,53 @@ function fmtMs(x) { return Number.isFinite(x) ? `${x >= 0 ? '+' : ''}${x.toFixed
 function fmtR(x)  { return Number.isFinite(x) ? x.toFixed(4) : '—'; }
 function fmtPct(x) { return Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : '—'; }
 
+// ── Validity checks panel ──
+let checksShowInfo = false;
+
+function renderChecksPanel(checks) {
+    const panel = document.getElementById('checks-panel');
+    if (!panel) return;
+    if (!checks || !checks.length) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+    // Summary counts
+    const halt = checks.filter(c => c.level === 'HALT').length;
+    const warn = checks.filter(c => c.level === 'WARN').length;
+    const info = checks.filter(c => c.level === 'INFO').length;
+    const parts = [];
+    if (halt) parts.push(`${halt} HALT`);
+    if (warn) parts.push(`${warn} WARN`);
+    if (info) parts.push(`${info} INFO`);
+    document.getElementById('checks-summary').textContent = parts.join(' · ') || 'no checks';
+
+    // Toggle logic
+    const toggle = document.getElementById('checks-toggle');
+    toggle.textContent = checksShowInfo ? 'Hide INFO' : 'Show INFO';
+    toggle.onclick = () => { checksShowInfo = !checksShowInfo; renderChecksPanel(checks); };
+
+    // Rows — highest severity first, but keep grouped by code family after that
+    const rows = [...checks];
+    const levelOrder = { HALT: 0, WARN: 1, INFO: 2 };
+    rows.sort((a, b) => (levelOrder[a.level] - levelOrder[b.level]) || a.code.localeCompare(b.code));
+
+    const visible = checksShowInfo ? rows : rows.filter(c => c.level !== 'INFO');
+    const list = document.getElementById('checks-list');
+    if (!visible.length) {
+        list.innerHTML = `<div class="check-empty">No issues at this severity level (${info} INFO hidden — click Show INFO).</div>`;
+        return;
+    }
+    list.innerHTML = visible.map(c => {
+        const cls = c.level.toLowerCase();
+        return `<div class="check-row check-${cls}">
+            <span class="pill ${cls}">${c.level}</span>
+            <span class="check-code">${escapeHtml(c.code)}</span>
+            <span class="check-message">${escapeHtml(c.message)}</span>
+        </div>`;
+    }).join('');
+}
+
 // Fetch and render the current subject's alignment (if any behavioural
 // data has been uploaded server-side but the current page doesn't have
 // it in memory yet).
@@ -419,6 +466,7 @@ async function refreshAlignmentForCurrentSubject() {
         if (!resp.ok) return;
         const d = await resp.json();
         renderAlignmentPanel(d.alignment, d.accuracy);
+        renderChecksPanel(d.checks);
     } catch (_) { /* backend unreachable — leave panel hidden */ }
 }
 
@@ -475,6 +523,7 @@ function initBehaviouralUpload() {
                 // subject, refresh the alignment panel immediately.
                 if (currentResultId && data.subject_id === currentResultId) {
                     renderAlignmentPanel(data.alignment, data.accuracy);
+                    renderChecksPanel(data.checks);
                 }
             } catch (err) {
                 setBehaviouralStatus(`⚠ ${sid}: ${err.message || 'Upload failed'}`, false);
@@ -524,6 +573,9 @@ function showResults(data) {
     // on demand; results endpoint doesn't yet include it, so we pull it.
     renderAlignmentPanel(data.alignment, data.accuracy);
     refreshAlignmentForCurrentSubject();
+
+    // Validity checks (always emitted by the backend when EEG is loaded)
+    renderChecksPanel(data.checks);
 
     // Theta card
     setCard('theta', s.theta, s.demographics);

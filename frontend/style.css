@@ -416,6 +416,62 @@ main {
     border: 1px solid rgba(230, 60, 60, 0.4);
 }
 
+/* Validity checks panel */
+.checks-panel .demo-icon {
+    color: #7fdc9e;
+}
+.checks-toggle {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+}
+.checks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+}
+.check-row {
+    display: grid;
+    grid-template-columns: auto 4.5rem 1fr;
+    gap: 0.6rem;
+    align-items: baseline;
+    padding: 0.25rem 0.4rem;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    line-height: 1.35;
+}
+.check-row.check-halt {
+    background: rgba(230, 60, 60, 0.06);
+    border-left: 2px solid #e77070;
+}
+.check-row.check-warn {
+    background: rgba(230, 170, 40, 0.06);
+    border-left: 2px solid #e6b846;
+}
+.check-row.check-info {
+    background: rgba(120, 160, 200, 0.04);
+    border-left: 2px solid rgba(120, 160, 200, 0.3);
+    color: var(--text-dim);
+}
+.check-code {
+    color: var(--text);
+    font-weight: 600;
+}
+.check-message {
+    color: var(--text);
+    white-space: normal;
+    word-break: break-word;
+}
+.check-info .check-message { color: var(--text-dim); }
+.check-empty {
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    padding: 0.4rem 0.2rem;
+}
+
 @keyframes progressSlide {
     0% { transform: translateX(-100%); }
     100% { transform: translateX(350%); }

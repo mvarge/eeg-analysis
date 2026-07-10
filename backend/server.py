@@ -32,7 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from parser import parse_labchart, parse_labchart_multi
+from parser import parse_labchart, parse_labchart_multi, ParsedEEG
 from subject_id import parse_filename as parse_upload_filename
 from pipeline import (
     PipelineResult, TrialResult, ChannelSummary,
@@ -48,6 +48,7 @@ from behavioural import (
     BehaviouralSession, AlignmentResult,
     parse_behavioural_session, align_block,
 )
+from checks import run_subject_checks, checks_to_payload
 
 
 app = FastAPI(title="EEG Flanker Analysis")
@@ -60,6 +61,7 @@ app.add_middleware(
 )
 
 _results: Dict[str, PipelineResult] = {}
+_parsed: Dict[str, "ParsedEEG"] = {}                # keep the ParsedEEG around for validity checks
 _behavioural: Dict[str, BehaviouralSession] = {}   # subject_id → parsed behavioural
 _alignment: Dict[str, List[AlignmentResult]] = {}  # subject_id → per-block alignment
 _demographics: List[Demographic] = []           # loaded from most recent CSV upload
@@ -288,6 +290,7 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
         result = run_pipeline(parsed)
         result_id = subject_id
         _results[result_id] = result
+        _parsed[result_id] = parsed
 
         # If behavioural data was pre-loaded under a placeholder subject_id
         # (i.e. the CSV filename lacked S<n>P<nn> so we keyed by "?PNNN"
@@ -312,6 +315,7 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
             "warnings": parsed.warnings,
             "alignment": [_alignment_payload(a) for a in alignment],
             "accuracy": _accuracy_payload(result_id),
+            "checks": _checks_payload_for(result_id),
         }
 
     except HTTPException:
@@ -348,6 +352,7 @@ async def list_subjects():
 async def remove_subject(result_id: str):
     """Drop one subject from memory."""
     _results.pop(result_id, None)
+    _parsed.pop(result_id, None)
     _alignment.pop(result_id, None)
     return {"status": "ok"}
 
@@ -437,6 +442,24 @@ def _alignment_payload(res: AlignmentResult) -> dict:
         "rt_correlation": _safe(res.rt_correlation),
         "congruency_agreement": _safe(res.congruency_agreement),
     }
+
+
+def _checks_payload_for(subject_id: str) -> List[dict]:
+    """Run every validity check for one subject and serialise the result."""
+    if subject_id not in _parsed or subject_id not in _results:
+        return []
+    parsed = _parsed[subject_id]
+    result = _results[subject_id]
+    alignments = _alignment.get(subject_id, [])
+    session = _behavioural.get(subject_id)
+    demo = match_demographics(subject_id, _demographics) if _demographics else None
+    checks = run_subject_checks(
+        parsed, result,
+        alignments=alignments,
+        beh_session=session,
+        demographic=demo,
+    )
+    return checks_to_payload(checks)
 
 
 def _accuracy_payload(subject_id: str) -> List[dict]:
@@ -625,6 +648,7 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
         "eeg_loaded": subject_id in _results,
         "alignment": [_alignment_payload(a) for a in alignment],
         "accuracy": _accuracy_payload(subject_id),
+        "checks": _checks_payload_for(subject_id),
     }
 
 
@@ -643,6 +667,7 @@ async def get_behavioural(subject_id: str):
         "eeg_loaded": subject_id in _results,
         "alignment": [_alignment_payload(a) for a in alignment],
         "accuracy": _accuracy_payload(subject_id),
+        "checks": _checks_payload_for(subject_id),
     }
 
 
