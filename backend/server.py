@@ -489,6 +489,7 @@ def _alignment_payload(res: AlignmentResult) -> dict:
         "unmatched_beh_row_indices": res.unmatched_beh_indices,
         "rt_correlation": _safe(res.rt_correlation),
         "congruency_agreement": _safe(res.congruency_agreement),
+        "rt_residual_ms": _safe(res.rt_residual_ms),
     }
 
 

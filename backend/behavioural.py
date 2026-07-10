@@ -272,6 +272,28 @@ class AlignmentResult:
     unmatched_beh_indices: List[int]        # beh rows that had no EEG counterpart (dropouts)
     rt_correlation: float                   # Pearson r across matched pairs (behavioural RT vs adjusted EEG RT)
     congruency_agreement: float             # 0–1 fraction of matched pairs whose congruency agrees
+    rt_residual_ms: float = float("nan")    # median |adjusted EEG RT − beh RT| across matched pairs (§6 residual)
+
+    # ── J-code gate helpers (docs §7) ──────────────────────────────────────
+    def passes_gate(
+        self,
+        min_matched: int = 10,
+        min_r: float = 0.99,
+        min_congruency: float = 1.0,
+    ) -> bool:
+        """True iff this block's alignment clears the HALT-level J gates
+        (J001 matched<min, J002 r<min, J003 congruency<100%). Offset-range
+        (J004) and count-mismatch (J006) are WARN-only and do not gate.
+        Used by block SELECTION (Task 3) to decide whether a candidate
+        segment is the real block."""
+        import math as _math
+        if len(self.matched_pairs) < min_matched:
+            return False
+        if _math.isnan(self.rt_correlation) or self.rt_correlation < min_r:
+            return False
+        if _math.isnan(self.congruency_agreement) or self.congruency_agreement < min_congruency:
+            return False
+        return True
 
 
 def _pearson_r(xs: Sequence[float], ys: Sequence[float]) -> float:
@@ -379,9 +401,13 @@ def align_block(
         cong_agree = sum(
             1 for e, b in matched if eeg_congruent[e] == beh_block[b].congruent
         ) / len(matched)
+        # Median absolute residual after removing the constant offset.
+        # On a correct join this is a couple of ms (§6 acceptance: ≤ ~2 ms).
+        rt_residual = _median([abs(e_rt - b_rt) for e_rt, b_rt in zip(eeg_rts, beh_rts)])
     else:
         rt_r = float("nan")
         cong_agree = float("nan")
+        rt_residual = float("nan")
 
     # Note: unmatched_beh_indices are indices into the *filtered* beh_block
     # list. Callers who want row indices in the original beh_trials list
@@ -394,4 +420,5 @@ def align_block(
         unmatched_beh_indices=unmatched_beh,
         rt_correlation=rt_r,
         congruency_agreement=cong_agree,
+        rt_residual_ms=rt_residual,
     )
