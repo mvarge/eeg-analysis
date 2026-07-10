@@ -139,6 +139,16 @@ def _summary_payload(r: PipelineResult) -> dict:
         "theta": _channel_payload(r.theta_summary),
         "beta":  _channel_payload(r.beta_summary),
         "demographics": _demographic_payload(r.filename),
+        # Per-recording adaptive thresholds + contamination metrics (Tasks
+        # 4/5/8). These are the values THIS recording used, self-calibrated
+        # from its own distributions — distinct from the frozen config below.
+        "adaptive": {
+            "blink_threshold_uv": _safe(round(getattr(r, "blink_threshold_uv", 0.0), 1)),
+            "emg_threshold": _safe(round(getattr(r, "emg_threshold", 0.0), 0)),
+            "c3_beta_share": _safe(round(getattr(r, "c3_beta_share", 0.0), 4)),
+            "c3_high_share": _safe(round(getattr(r, "c3_high_share", 0.0), 4)),
+            "fz_ptp_median": _safe(round(getattr(r, "fz_ptp_median", 0.0), 1)),
+        },
         "config": {
             "hp_hz": HP_HZ,
             "window_s": WIN_S,

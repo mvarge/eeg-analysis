@@ -561,6 +561,22 @@ function showResults(data) {
     document.getElementById('info-trials').textContent =
         `${s.n_trials} · ${s.n_congruent} con / ${s.n_incongruent} inc`;
 
+    // Per-recording adaptive thresholds (Tasks 4/5) — show the values THIS
+    // recording self-calibrated to, so the analyst sees the pipeline adapted.
+    const adaptiveItem = document.getElementById('info-adaptive-item');
+    const adaptiveEl = document.getElementById('info-adaptive');
+    if (adaptiveItem && adaptiveEl && s.adaptive) {
+        const blink = s.adaptive.blink_threshold_uv;
+        const emg = s.adaptive.emg_threshold;
+        if (blink || emg) {
+            adaptiveEl.textContent =
+                `blink ${Number(blink).toFixed(0)}µV · EMG ${Number(emg).toLocaleString()}µV²`;
+            adaptiveItem.hidden = false;
+        } else {
+            adaptiveItem.hidden = true;
+        }
+    }
+
     // Channel names
     document.getElementById('ch1-name').textContent = s.theta.channel;
     document.getElementById('ch2-name').textContent = s.beta.channel;
@@ -622,7 +638,55 @@ function showResults(data) {
     updateCompareButton();
 }
 
+function renderExcludedCard(prefix, band, card) {
+    // Show survival bookkeeping (so the reader sees WHY) but no power values.
+    const survEl = document.getElementById(`${prefix}-survival`);
+    if (survEl) {
+        survEl.textContent =
+            `${band.surviving}/${band.surviving + band.excluded} trials — power not reported`;
+    }
+    // Blank the numeric readouts.
+    for (const id of [`${prefix}-rel-con`, `${prefix}-rel-inc`]) {
+        const el = document.getElementById(id); if (el) el.textContent = '—';
+    }
+    for (const id of [`${prefix}-abs-con`, `${prefix}-abs-inc`]) {
+        const el = document.getElementById(id); if (el) el.textContent = 'abs —';
+    }
+    for (const id of [`${prefix}-bar-con`, `${prefix}-bar-inc`]) {
+        const el = document.getElementById(id); if (el) el.style.width = '0%';
+    }
+    const blocksEl = document.getElementById(`${prefix}-blocks`);
+    if (blocksEl) blocksEl.innerHTML = '';
+    const flag = document.getElementById(`${prefix}-balance`);
+    if (flag) flag.hidden = true;
+    if (!card) return;
+    card.classList.add('channel-excluded');
+    let notice = card.querySelector('.channel-excluded-notice');
+    if (!notice) {
+        notice = document.createElement('div');
+        notice.className = 'channel-excluded-notice';
+        card.insertBefore(notice, card.firstChild);
+    }
+    const code = band.exclusion_code || 'excluded';
+    const reason = band.exclusion_reason || 'contamination';
+    notice.innerHTML =
+        `<span class="pill warn">${escapeHtml(code)}</span> ` +
+        `Channel excluded — ${escapeHtml(reason)}. Power not reported.`;
+}
+
 function setCard(prefix, band, demographics) {
+    // Channel-scoped exclusion (Task 7): when this derivation/band was
+    // invalidated (e.g. S005 on C3-C4 beta), the backend nulls all power
+    // values. Show the exclusion notice instead of NaN and stop.
+    const card = document.getElementById(`${prefix}-rel-con`)?.closest('.power-card');
+    if (band.channel_excluded) {
+        renderExcludedCard(prefix, band, card);
+        return;
+    }
+    if (card) card.classList.remove('channel-excluded');
+    const oldNotice = card && card.querySelector('.channel-excluded-notice');
+    if (oldNotice) oldNotice.remove();
+
     const relCon = band.rel_median_con ?? 0;
     const relInc = band.rel_median_inc ?? 0;
     const absCon = band.abs_median_con ?? 0;

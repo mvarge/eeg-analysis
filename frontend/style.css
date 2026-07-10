@@ -416,6 +416,23 @@ main {
     border: 1px solid rgba(230, 60, 60, 0.4);
 }
 
+/* Channel-scoped exclusion (Task 7) */
+.power-card.channel-excluded {
+    opacity: 0.72;
+    border-color: rgba(230, 170, 40, 0.4);
+}
+.channel-excluded-notice {
+    display: block;
+    margin-bottom: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 4px;
+    background: rgba(230, 170, 40, 0.1);
+    border: 1px solid rgba(230, 170, 40, 0.3);
+    color: #e6b846;
+    font-size: 0.72rem;
+    line-height: 1.4;
+}
+
 /* Validity checks panel */
 .checks-panel .demo-icon {
     color: #7fdc9e;
