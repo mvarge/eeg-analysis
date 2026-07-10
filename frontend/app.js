@@ -127,6 +127,7 @@ function initUpload() {
 
     // Demographics CSV
     initDemographicsUpload();
+    initBehaviouralUpload();
     refreshDemographicsStatus();
 
     async function uploadFiles(files) {
@@ -334,6 +335,149 @@ function escapeHtml(s) {
     }[c]));
 }
 
+// ── Behavioural alignment ──
+
+// Render the alignment panel from a payload like data.alignment
+// (list of per-block objects). Passing null/[] hides the panel.
+function renderAlignmentPanel(alignment) {
+    const panel = document.getElementById('alignment-panel');
+    if (!panel) return;
+    if (!alignment || !alignment.length) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+    const src = document.getElementById('alignment-source');
+    if (src) src.textContent = `${alignment.length} block${alignment.length > 1 ? 's' : ''} aligned`;
+
+    const grid = document.getElementById('alignment-fields');
+    // Per-block cells; each block gets: matched, offset, r, congruency,
+    // + a coloured status pill based on the J-code gates (spec §7).
+    grid.innerHTML = alignment.map(a => {
+        const gates = alignmentGateStatus(a);
+        const pillCls = `pill ${gates.severity}`;
+        return `<div class="demo-field alignment-field">
+            <span class="demo-field-label">Block ${a.block} <span class="${pillCls}">${gates.label}</span></span>
+            <span class="demo-field-value alignment-value">
+                <span>matched <b>${a.matched}</b>${a.unmatched_eeg ? ` · ${a.unmatched_eeg} EEG missing` : ''}${a.unmatched_beh ? ` · ${a.unmatched_beh} behavioural missing` : ''}</span>
+                <span>offset <b>${fmtMs(a.eeg_offset_ms)}</b> · r <b>${fmtR(a.rt_correlation)}</b> · congruency <b>${fmtPct(a.congruency_agreement)}</b></span>
+                ${gates.detail ? `<span class="alignment-detail">${escapeHtml(gates.detail)}</span>` : ''}
+            </span>
+        </div>`;
+    }).join('');
+}
+
+// Apply the docs/DATA_VALIDITY_CHECKING.md §7 J-code gates and return a
+// UI-friendly severity + label + detail message.
+function alignmentGateStatus(a) {
+    const problems = [];
+    if (a.matched < 10) problems.push({ sev: 'halt', msg: 'J001 fewer than 10 matched trials' });
+    if (Number.isFinite(a.rt_correlation) && a.rt_correlation < 0.99) {
+        problems.push({ sev: 'halt', msg: `J002 RT correlation ${a.rt_correlation.toFixed(4)} < 0.99` });
+    }
+    if (Number.isFinite(a.congruency_agreement) && a.congruency_agreement < 1.0) {
+        problems.push({ sev: 'halt', msg: `J003 congruency agreement ${(a.congruency_agreement * 100).toFixed(1)}% < 100%` });
+    }
+    if (Number.isFinite(a.eeg_offset_ms) && (a.eeg_offset_ms < 0 || a.eeg_offset_ms > 100)) {
+        problems.push({ sev: 'warn', msg: `J004 offset ${a.eeg_offset_ms.toFixed(1)} ms outside 0–100 ms` });
+    }
+    if (a.unmatched_eeg || a.unmatched_beh) {
+        problems.push({ sev: 'warn', msg: `J006 EEG/beh trial count mismatch` });
+    }
+    if (problems.some(p => p.sev === 'halt')) {
+        return { severity: 'halt', label: 'HALT', detail: problems.map(p => p.msg).join(' · ') };
+    }
+    if (problems.length) {
+        return { severity: 'warn', label: 'WARN', detail: problems.map(p => p.msg).join(' · ') };
+    }
+    return { severity: 'pass', label: 'PASS', detail: '' };
+}
+
+function fmtMs(x) { return Number.isFinite(x) ? `${x >= 0 ? '+' : ''}${x.toFixed(1)} ms` : '—'; }
+function fmtR(x)  { return Number.isFinite(x) ? x.toFixed(4) : '—'; }
+function fmtPct(x) { return Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : '—'; }
+
+// Fetch and render the current subject's alignment (if any behavioural
+// data has been uploaded server-side but the current page doesn't have
+// it in memory yet).
+async function refreshAlignmentForCurrentSubject() {
+    if (!currentResultId) return;
+    try {
+        const resp = await fetch(`${API}/api/behavioural/${encodeURIComponent(currentResultId)}`);
+        if (!resp.ok) return;
+        const d = await resp.json();
+        renderAlignmentPanel(d.alignment);
+    } catch (_) { /* backend unreachable — leave panel hidden */ }
+}
+
+function setBehaviouralStatus(msg, loaded) {
+    const el = document.getElementById('beh-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.toggle('loaded', !!loaded);
+}
+
+function initBehaviouralUpload() {
+    const input = document.getElementById('beh-file-input');
+    if (!input) return;
+
+    input.addEventListener('change', async () => {
+        if (!input.files || !input.files.length) return;
+        const files = Array.from(input.files);
+
+        // Group by canonical subject_id (same rule as EEG upload). Fall
+        // back to a `subject-NNN` group key for files whose names carry
+        // OpenSesame's `subject-NNN` convention; the backend will
+        // resolve those to `S<n>P<nn>` via subject_nr.
+        const groups = new Map();
+        for (const f of files) {
+            let sid = subjectIdFromFilename(f.name);
+            // If the filename didn't yield a real S<n>P<nn>, try to pull
+            // a subject-NNN grouping so we still submit multi-part files
+            // together.
+            if (!/^S\d+P\d+$/i.test(sid)) {
+                const m = f.name.match(/subject[-_ ]?(\d+)/i);
+                sid = m ? `subject-${m[1]}` : sid;
+            }
+            if (!groups.has(sid)) groups.set(sid, []);
+            groups.get(sid).push(f);
+        }
+
+        let uploaded = 0;
+        let matched = 0;
+        setBehaviouralStatus('Uploading…', false);
+        for (const [sid, group] of groups.entries()) {
+            const fd = new FormData();
+            for (const f of group) fd.append('files', f);
+            try {
+                const resp = await fetch(`${API}/api/behavioural/upload`, { method: 'POST', body: fd });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({ detail: 'Upload failed' }));
+                    setBehaviouralStatus(`⚠ ${sid}: ${err.detail || 'Upload failed'}`, false);
+                    continue;
+                }
+                const data = await resp.json();
+                uploaded++;
+                if (data.alignment && data.alignment.length) matched++;
+                // If this behavioural session is for the currently-displayed
+                // subject, refresh the alignment panel immediately.
+                if (currentResultId && data.subject_id === currentResultId) {
+                    renderAlignmentPanel(data.alignment);
+                }
+            } catch (err) {
+                setBehaviouralStatus(`⚠ ${sid}: ${err.message || 'Upload failed'}`, false);
+            }
+        }
+
+        setBehaviouralStatus(
+            `${uploaded} subject${uploaded !== 1 ? 's' : ''} loaded · ${matched} aligned to EEG`,
+            uploaded > 0,
+        );
+        document.getElementById('beh-upload-label').textContent = 'Upload more CSVs';
+        input.value = '';
+    });
+}
+
 // ── Individual results ──
 function showResults(data) {
     currentResultId = data.result_id;
@@ -362,6 +506,12 @@ function showResults(data) {
 
     // Demographics panel (only shown if matched)
     renderDemographicsPanel(s.demographics);
+
+    // Behavioural-alignment panel (only shown if an OpenSesame CSV has been
+    // aligned to this subject's EEG). The upload endpoint returns alignment
+    // on demand; results endpoint doesn't yet include it, so we pull it.
+    renderAlignmentPanel(data.alignment);
+    refreshAlignmentForCurrentSubject();
 
     // Theta card
     setCard('theta', s.theta, s.demographics);

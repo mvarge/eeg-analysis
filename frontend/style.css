@@ -369,6 +369,53 @@ main {
     opacity: 0.5;
 }
 
+/* Alignment panel — reuses .demographics-panel + .demo-* structure */
+.alignment-panel .demo-icon {
+    color: var(--accent);
+}
+.alignment-field .demo-field-value.alignment-value {
+    white-space: normal;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
+}
+.alignment-field .alignment-detail {
+    color: var(--text-dim);
+    font-size: 0.72rem;
+}
+.alignment-field b {
+    color: var(--text);
+    font-weight: 600;
+}
+.pill {
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    margin-left: 0.35rem;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    vertical-align: middle;
+}
+.pill.pass {
+    background: rgba(60, 200, 120, 0.16);
+    color: #7fdc9e;
+    border: 1px solid rgba(60, 200, 120, 0.35);
+}
+.pill.warn {
+    background: rgba(230, 170, 40, 0.16);
+    color: #e6b846;
+    border: 1px solid rgba(230, 170, 40, 0.35);
+}
+.pill.halt {
+    background: rgba(230, 60, 60, 0.16);
+    color: #e77070;
+    border: 1px solid rgba(230, 60, 60, 0.4);
+}
+
 @keyframes progressSlide {
     0% { transform: translateX(-100%); }
     100% { transform: translateX(350%); }
