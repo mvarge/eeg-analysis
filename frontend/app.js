@@ -1636,6 +1636,213 @@ function closeEpochViewer() {
     _epochCurrent = null;
 }
 
+// ── Raw EEG Data viewer (whole-recording overview) ──
+// Shows the ENTIRE continuous recording (decimated) in one scrollable trace.
+// The signal the pipeline actually analysed — the epoch window around every
+// paired trial — is drawn in colour over a greyed-out background trace of
+// everything it ignored. Block start/end spans, per-trial stimulus onset and
+// keypress (by condition), and each epoch's accept/reject verdict are overlaid.
+let _rawEegLoaded = null;   // result_id currently rendered
+
+async function openRawEeg() {
+    if (!currentResultId) return;
+    const modal = document.getElementById('raweeg-modal');
+    const body = document.getElementById('raweeg-body');
+    const title = document.getElementById('raweeg-title');
+    if (!modal || !body) return;
+
+    modal.hidden = false;
+    title.textContent = `Raw EEG Data — ${currentResultId}`;
+    body.innerHTML = `<p class="epoch-loading">Reconstructing full recording…</p>`;
+
+    let data;
+    try {
+        const url = `${API}/api/subjects/${encodeURIComponent(currentResultId)}/recording`;
+        const resp = await fetch(url);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+        data = await resp.json();
+    } catch (e) {
+        body.innerHTML = `<p class="epoch-error">Could not load recording: ${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    _rawEegLoaded = currentResultId;
+    renderRawEeg(data);
+}
+
+function renderRawEeg(data) {
+    const body = document.getElementById('raweeg-body');
+    const ov = data.overview;
+    const trials = data.trials || [];
+    const blocks = data.blocks || [];
+    const nIncl = trials.filter(t => t.included).length;
+    const nExcl = trials.length - nIncl;
+
+    body.innerHTML = `
+        <div class="raweeg-legend">
+            <span class="rw-key"><span class="rw-swatch rw-grey"></span> Not analysed (ignored by pipeline)</span>
+            <span class="rw-key"><span class="rw-swatch rw-fz"></span> Fz–Pz (analysed)</span>
+            <span class="rw-key"><span class="rw-swatch rw-c3"></span> C3–C4 (analysed)</span>
+            <span class="rw-key"><span class="rw-swatch rw-incl"></span> Epoch window — accepted</span>
+            <span class="rw-key"><span class="rw-swatch rw-excl"></span> Epoch window — rejected</span>
+            <span class="rw-key"><span class="rw-line rw-con"></span> Congruent onset · keypress</span>
+            <span class="rw-key"><span class="rw-line rw-inc"></span> Incongruent onset · keypress</span>
+        </div>
+        <p class="raweeg-meta">
+            ${ov.n_samples.toLocaleString()} samples @ ${ov.fs} Hz
+            (${(ov.duration_s / 60).toFixed(1)} min) · shown decimated ×${ov.decimation} ·
+            ${trials.length} trials (${nIncl} accepted, ${nExcl} rejected) ·
+            epoch window ${data.window.win_s * 1000} ms + ${data.window.pad_s * 1000} ms buffer
+        </p>
+        <div id="raweeg-plot" class="raweeg-plot"></div>
+        <p class="raweeg-hint">Drag to zoom · use the range slider below to scroll the whole recording · double-click to reset.</p>`;
+
+    drawRawEeg(data);
+}
+
+function drawRawEeg(data) {
+    const ov = data.overview;
+    const trials = data.trials || [];
+    const blocks = data.blocks || [];
+    const times = ov.times_s;
+    const fz = ov.fz;
+    const c3 = ov.c3;
+
+    // Background: the whole recording greyed out (everything, analysed or not).
+    const traces = [
+        { x: times, y: fz, name: 'Fz–Pz (all)', type: 'scattergl', mode: 'lines',
+          line: { color: 'rgba(148,163,184,0.55)', width: 0.7 }, hoverinfo: 'skip', showlegend: false },
+        { x: times, y: c3, name: 'C3–C4 (all)', type: 'scattergl', mode: 'lines',
+          line: { color: 'rgba(148,163,184,0.35)', width: 0.7 }, hoverinfo: 'skip', showlegend: false },
+    ];
+
+    // Foreground: coloured trace segments over each analysed epoch window. Using
+    // NaN gaps to break the line between epochs keeps it a single cheap trace.
+    const fzSeg = new Array(times.length).fill(NaN);
+    const c3Seg = new Array(times.length).fill(NaN);
+    // Precompute window bounds; walk the decimated axis once per trial region.
+    for (const t of trials) {
+        // find decimated indices within [win_start_s, win_end_s]
+        let i = lowerBound(times, t.win_start_s);
+        for (; i < times.length && times[i] <= t.win_end_s; i++) {
+            fzSeg[i] = fz[i];
+            c3Seg[i] = c3[i];
+        }
+    }
+    traces.push(
+        { x: times, y: fzSeg, name: 'Fz–Pz (analysed)', type: 'scattergl', mode: 'lines',
+          line: { color: '#2563eb', width: 1.1 }, connectgaps: false,
+          hovertemplate: '%{x:.2f}s<br>%{y:.1f} µV<extra>Fz–Pz</extra>' },
+        { x: times, y: c3Seg, name: 'C3–C4 (analysed)', type: 'scattergl', mode: 'lines',
+          line: { color: '#16a34a', width: 1.1 }, connectgaps: false,
+          hovertemplate: '%{x:.2f}s<br>%{y:.1f} µV<extra>C3–C4</extra>' },
+    );
+
+    // Shapes: block spans, buffer + window rects (accept/reject coloured),
+    // onset & keypress lines (coloured by condition).
+    const shapes = [];
+    const annotations = [];
+
+    for (const b of blocks) {
+        shapes.push({ type: 'rect', xref: 'x', yref: 'paper',
+            x0: b.start_s, x1: b.end_s, y0: 0, y1: 1,
+            fillcolor: 'rgba(37,99,235,0.04)', line: { width: 0 }, layer: 'below' });
+        // start & end markers
+        shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: b.start_s, x1: b.start_s,
+            y0: 0, y1: 1, line: { color: '#1e3a8a', width: 1.4 } });
+        shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: b.end_s, x1: b.end_s,
+            y0: 0, y1: 1, line: { color: '#1e3a8a', width: 1.4, dash: 'dot' } });
+        annotations.push({ x: b.start_s, y: 1.06, xref: 'x', yref: 'paper',
+            text: `Block ${b.block} start`, showarrow: false, font: { size: 10, color: '#1e3a8a' } });
+        annotations.push({ x: b.end_s, y: 1.06, xref: 'x', yref: 'paper',
+            text: `Block ${b.block} end`, showarrow: false, font: { size: 10, color: '#1e3a8a' } });
+    }
+
+    for (const t of trials) {
+        // buffer band (light) then window band (coloured by verdict)
+        shapes.push({ type: 'rect', xref: 'x', yref: 'paper',
+            x0: t.buf_start_s, x1: t.buf_end_s, y0: 0.04, y1: 0.96,
+            fillcolor: 'rgba(148,163,184,0.10)', line: { width: 0 }, layer: 'below' });
+        shapes.push({ type: 'rect', xref: 'x', yref: 'paper',
+            x0: t.win_start_s, x1: t.win_end_s, y0: 0.04, y1: 0.96,
+            fillcolor: t.included ? 'rgba(22,163,74,0.16)' : 'rgba(220,38,38,0.16)',
+            line: { color: t.included ? 'rgba(22,163,74,0.5)' : 'rgba(220,38,38,0.5)', width: 0.6 },
+            layer: 'below' });
+        // onset (solid) + keypress (dashed), coloured by condition
+        const col = t.cond === 'con' ? '#059669' : '#dc2626';
+        shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: t.onset_s, x1: t.onset_s,
+            y0: 0.04, y1: 0.96, line: { color: col, width: 0.8 } });
+        if (t.keypress_s != null) {
+            shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: t.keypress_s, x1: t.keypress_s,
+                y0: 0.04, y1: 0.96, line: { color: col, width: 0.8, dash: 'dot' } });
+        }
+    }
+
+    // Clickable trial markers (at onset, near top) so hovering/clicking a trial
+    // opens its epoch viewer. One marker trace carries all trials.
+    const mx = trials.map(t => t.onset_s);
+    const my = trials.map(() => null);   // placed via yref paper below
+    const mtext = trials.map(t => {
+        const lbl = t.task_number != null ? `Task #${t.task_number}` : `EEG #${t.trial}`;
+        return `${lbl} · ${t.condition} · block ${t.block}<br>${t.included ? 'accepted' : 'rejected: ' + (t.reason || '—')}`;
+    });
+    traces.push({
+        x: mx, y: trials.map(() => 0),
+        yaxis: 'y2',
+        type: 'scattergl', mode: 'markers', name: 'Trials',
+        marker: {
+            size: 8,
+            symbol: trials.map(t => t.included ? 'circle' : 'x'),
+            color: trials.map(t => t.included ? '#16a34a' : '#dc2626'),
+            line: { width: 0.5, color: '#fff' },
+        },
+        text: mtext, hovertemplate: '%{text}<extra></extra>',
+        customdata: trials.map(t => t.trial),
+        showlegend: false,
+    });
+
+    const layout = {
+        margin: { l: 50, r: 12, t: 28, b: 60 }, height: 460,
+        xaxis: { title: 'Time from recording start (s)', rangeslider: { visible: true }, zeroline: false },
+        yaxis: { title: 'µV', domain: [0, 0.92] },
+        yaxis2: { domain: [0.94, 1], range: [-1, 1], visible: false, fixedrange: true },
+        shapes, annotations,
+        legend: { orientation: 'h', y: -0.35 },
+        hovermode: 'closest', dragmode: 'zoom',
+        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    };
+    Plotly.newPlot('raweeg-plot', traces, layout,
+        { displayModeBar: true, responsive: true, displaylogo: false,
+          modeBarButtonsToRemove: ['lasso2d', 'select2d'] });
+
+    const plotEl = document.getElementById('raweeg-plot');
+    if (plotEl) {
+        plotEl.on('plotly_click', (ev) => {
+            const p = ev.points && ev.points[0];
+            if (!p || p.customdata == null) return;
+            closeRawEeg();
+            openEpochViewer(p.customdata);
+        });
+    }
+}
+
+// Smallest index i such that arr[i] >= target (arr ascending).
+function lowerBound(arr, target) {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (arr[mid] < target) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+function closeRawEeg() {
+    const modal = document.getElementById('raweeg-modal');
+    if (modal) modal.hidden = true;
+}
+
 // ── Missing trials table ──
 // Flanker (behavioural) trials that have no matching EEG epoch. Requires an
 // uploaded behavioural file; the box is hidden otherwise. Task numbers are the
@@ -2494,6 +2701,19 @@ function initActions() {
     });
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeEpochViewer();
+    });
+
+    // Raw EEG Data viewer (button + modal close)
+    const rawBtn = document.getElementById('btn-raw-eeg');
+    if (rawBtn) rawBtn.addEventListener('click', openRawEeg);
+    const rawClose = document.getElementById('raweeg-close');
+    if (rawClose) rawClose.addEventListener('click', closeRawEeg);
+    const rawModal = document.getElementById('raweeg-modal');
+    if (rawModal) rawModal.addEventListener('click', (e) => {
+        if (e.target.id === 'raweeg-modal') closeRawEeg();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeRawEeg();
     });
 
     document.getElementById('btn-download-all').addEventListener('click', () => {

@@ -2016,3 +2016,44 @@ footer p {
 .mr-align   { background: rgba(234, 179, 8, 0.15); color: #fde047; border: 1px solid rgba(234, 179, 8, 0.4); }
 .mr-absent  { background: rgba(107, 114, 128, 0.18); color: #cbd5e1; border: 1px solid rgba(107, 114, 128, 0.4); }
 .mr-detail { font-size: 0.72rem; color: var(--text-dim); margin-left: 0.35rem; }
+
+/* ── Raw EEG Data viewer (whole-recording overview) ── */
+.results-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin: 0.25rem 0 0.75rem;
+}
+.raweeg-plot {
+    width: 100%;
+    min-height: 460px;
+}
+.raweeg-meta {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    margin: 0.25rem 0 0.5rem;
+}
+.raweeg-hint {
+    font-size: 0.74rem;
+    color: var(--text-dim);
+    margin-top: 0.4rem;
+    text-align: center;
+}
+.raweeg-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem 1.1rem;
+    font-size: 0.74rem;
+    color: var(--text-dim);
+    margin-bottom: 0.5rem;
+}
+.rw-key { display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
+.rw-swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+.rw-grey { background: rgba(148,163,184,0.55); }
+.rw-fz   { background: #2563eb; }
+.rw-c3   { background: #16a34a; }
+.rw-incl { background: rgba(22,163,74,0.35); border: 1px solid rgba(22,163,74,0.6); }
+.rw-excl { background: rgba(220,38,38,0.35); border: 1px solid rgba(220,38,38,0.6); }
+.rw-line { width: 14px; height: 0; border-top: 2px solid; display: inline-block; }
+.rw-con  { border-color: #059669; }
+.rw-inc  { border-color: #dc2626; }

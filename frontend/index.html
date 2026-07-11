@@ -120,6 +120,15 @@
                 <div class="info-item" id="info-adaptive-item" hidden><span class="info-label">Adaptive</span><span class="info-value" id="info-adaptive">—</span></div>
             </div>
 
+            <div class="results-toolbar">
+                <button id="btn-raw-eeg" class="btn-secondary btn-sm" type="button">
+                    <svg width="16" height="16" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                        <path d="M1 9h3l2-5 3 10 2-7 2 4h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    Raw EEG Data
+                </button>
+            </div>
+
             <!-- Demographics panel (only shown when matched via CSV) -->
             <div class="demographics-panel" id="demographics-panel" hidden>
                 <div class="demo-header">
@@ -451,6 +460,17 @@
                 <button id="prov-close" class="modal-close" aria-label="Close">×</button>
             </div>
             <div id="prov-body" class="modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Raw EEG Data viewer modal: whole-recording overview -->
+    <div id="raweeg-modal" class="modal-overlay" hidden>
+        <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="raweeg-title">
+            <div class="modal-head">
+                <h3 id="raweeg-title">Raw EEG Data</h3>
+                <button id="raweeg-close" class="modal-close" aria-label="Close">×</button>
+            </div>
+            <div id="raweeg-body" class="modal-body"></div>
         </div>
     </div>
 
