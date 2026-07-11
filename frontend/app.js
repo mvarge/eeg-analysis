@@ -1982,7 +1982,61 @@ async function showRefreshComparison() {
     // benign data gap (safely excluded) from a fixable upstream block/merge fault.
     renderRefreshExclusions(data);
 
+    // Side-by-side sample-level averages for all three measures, up top.
+    renderRefreshOverview(data.measures);
+
     renderRefreshMeasures(data.measures);
+}
+
+// Top-of-page overview: the average (mean Δ) difference across the sample for
+// each measure, shown side by side so trends in spectral power and reaction
+// time are visible at a glance. Uses the same group stat as each measure's
+// headline (mean Δ of the per-participant median differences) — never affected
+// by the inspection toggle.
+function renderRefreshOverview(measures) {
+    const el = document.getElementById('refresh-overview');
+    if (!el) return;
+    if (!measures || !measures.length) {
+        el.hidden = true;
+        el.innerHTML = '';
+        return;
+    }
+
+    const cards = measures.map(m => {
+        const g = m.group;
+        const dp = m.decimals;
+        const diffLabel = m.diff_label || '165 Hz − 60 Hz';
+        if (!g || g.n === 0) {
+            return `
+            <div class="ro-card ro-empty">
+                <div class="ro-measure">${escapeHtml(m.label)}</div>
+                <div class="ro-nodata">No participant has both conditions yet.</div>
+            </div>`;
+        }
+        const d = g.mean_diff;
+        const dir = d > 0 ? 'ro-up' : (d < 0 ? 'ro-down' : 'ro-flat');
+        const arrow = d > 0 ? '▲' : (d < 0 ? '▼' : '■');
+        const ci = (g.ci95_lo == null)
+            ? '—'
+            : `${fmtNum(g.ci95_lo, dp)} … ${fmtNum(g.ci95_hi, dp)}`;
+        return `
+        <div class="ro-card">
+            <div class="ro-measure">${escapeHtml(m.label)}</div>
+            <div class="ro-sub">${escapeHtml(m.unit)}</div>
+            <div class="ro-mean ${dir}"><span class="ro-arrow">${arrow}</span>${d > 0 ? '+' : ''}${fmtNum(d, dp)}</div>
+            <div class="ro-mean-lab">mean Δ (${escapeHtml(diffLabel)})</div>
+            <div class="ro-meta">
+                <span title="Median of the per-participant differences">median Δ ${fmtNum(g.median_diff, dp)}</span>
+                <span title="95% confidence interval of the mean difference">95% CI ${ci}</span>
+                <span>N=${g.n}</span>
+            </div>
+        </div>`;
+    }).join('');
+
+    el.hidden = false;
+    el.innerHTML = `
+        <div class="ro-title">Sample averages · trend across all participants</div>
+        <div class="ro-grid">${cards}</div>`;
 }
 
 // Collect the excluded subjects across measures and explain each. A subject can

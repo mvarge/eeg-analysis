@@ -1688,6 +1688,78 @@ footer p {
     font-size: 0.76rem;
     margin-bottom: 1rem;
 }
+
+/* ── Refresh overview: sample averages side by side (top of page) ── */
+.refresh-overview {
+    margin-bottom: 1.4rem;
+}
+.ro-title {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    margin-bottom: 0.6rem;
+}
+.ro-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.9rem;
+}
+.ro-card {
+    padding: 1rem 1.1rem;
+    background: rgba(94, 234, 212, 0.04);
+    border: 1px solid rgba(94, 234, 212, 0.18);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+.ro-measure {
+    font-family: var(--font-display);
+    font-size: 0.9rem;
+    color: var(--text);
+    font-weight: 600;
+}
+.ro-sub {
+    font-size: 0.66rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 0.35rem;
+}
+.ro-mean {
+    font-family: var(--font-mono);
+    font-size: 1.7rem;
+    font-weight: 700;
+    line-height: 1.1;
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+}
+.ro-arrow { font-size: 0.9rem; }
+.ro-up { color: #86efac; }
+.ro-down { color: #fca5a5; }
+.ro-flat { color: var(--text-dim); }
+.ro-mean-lab {
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    margin-bottom: 0.5rem;
+}
+.ro-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.15rem 0.9rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
+    padding-top: 0.5rem;
+}
+.ro-empty { justify-content: center; }
+.ro-nodata { font-size: 0.72rem; color: var(--text-dim); }
+@media (max-width: 780px) {
+    .ro-grid { grid-template-columns: 1fr; }
+}
 .refresh-chart {
     cursor: pointer;
     border: 1px solid transparent;
