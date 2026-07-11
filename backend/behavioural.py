@@ -48,9 +48,12 @@ REQUIRED_COLUMNS = (
 )
 
 # Optional columns — useful when present, silently absent otherwise.
-OPTIONAL_COLUMNS = ("flankers", "targets")
+# `live_row` is the OpenSesame per-block trial index (0-79, resets each block);
+# it gives the canonical flanker "task number" the reviewer navigates by.
+OPTIONAL_COLUMNS = ("flankers", "targets", "live_row")
 
 STAGE_BLOCK_MAP = {"first": 1, "second": 2}
+TRIALS_PER_BLOCK = 80
 
 # Alignment defaults. Overridable via the align function's parameters.
 DEFAULT_RT_TOLERANCE_MS = 20.0
@@ -73,6 +76,18 @@ class BehaviouralTrial:
     subject_parity: str
     flankers: Optional[str] = None
     targets: Optional[str] = None
+    live_row: Optional[int] = None  # OpenSesame per-block trial index (0-79), if present
+
+    @property
+    def task_number(self) -> Optional[int]:
+        """Canonical 1-based flanker task number across both blocks (1-160).
+
+        Derived from the OpenSesame per-block `live_row` (0-based, resets each
+        block) plus the block offset. Returns None when `live_row` is absent.
+        """
+        if self.live_row is None:
+            return None
+        return (self.block - 1) * TRIALS_PER_BLOCK + self.live_row + 1
 
 
 @dataclass
@@ -193,6 +208,11 @@ def parse_behavioural_csv(
                 subject_parity=row[idx["subject_parity"]].strip().lower(),
                 flankers=row[idx["flankers"]] if "flankers" in idx else None,
                 targets=row[idx["targets"]] if "targets" in idx else None,
+                live_row=(
+                    _to_int(row[idx["live_row"]], "live_row", local_row)
+                    if "live_row" in idx and row[idx["live_row"]].strip() != ""
+                    else None
+                ),
             )
         except ValueError as e:
             warnings.append(f"{filename}:L{local_row}: {e}; row skipped.")

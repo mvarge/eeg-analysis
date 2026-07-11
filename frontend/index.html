@@ -250,7 +250,9 @@
                     <table id="included-table" class="excluded-table">
                         <thead>
                             <tr>
-                                <th>#</th><th>Block</th><th>Onset</th><th>Condition</th><th>RT</th>
+                                <th title="Canonical flanker task number (1-160), matched via RT alignment">Task #</th>
+                                <th title="Trial number within the EEG recording">EEG #</th>
+                                <th>Block</th><th>Onset</th><th>Condition</th><th>RT</th>
                                 <th>Fz p-t-p</th><th>θ rel</th><th>β rel</th>
                                 <th>maxz</th><th>impact</th><th>coinc</th>
                             </tr>
@@ -267,9 +269,33 @@
                     <table id="excluded-table" class="excluded-table">
                         <thead>
                             <tr>
-                                <th>#</th><th>Block</th><th>Onset</th><th>Condition</th><th>RT</th>
+                                <th title="Canonical flanker task number (1-160), matched via RT alignment">Task #</th>
+                                <th title="Trial number within the EEG recording">EEG #</th>
+                                <th>Block</th><th>Onset</th><th>Condition</th><th>RT</th>
                                 <th>Fz p-t-p</th><th>maxz</th><th>impact</th><th>coinc</th>
                                 <th>Fz-Pz</th><th>C3-C4</th><th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Missing trials table: flanker tasks with no matching EEG epoch -->
+            <div class="excluded-section" id="missing-section" hidden>
+                <h3>Missing Trials <span id="missing-count" class="muted"></span></h3>
+                <p class="section-note">
+                    Flanker (behavioural) trials with no matching EEG epoch. The EEG
+                    recording is missing these tasks, so no EEG data could be extracted.
+                    Task numbers come from the flanker file.
+                </p>
+                <div class="excluded-table-wrap">
+                    <table id="missing-table" class="excluded-table">
+                        <thead>
+                            <tr>
+                                <th title="Canonical flanker task number (1-160)">Task #</th>
+                                <th title="Trial number within the flanker block (1-80)">Block #</th>
+                                <th>Block</th><th>Condition</th><th>RT</th><th>Correct</th><th>Reason</th>
                             </tr>
                         </thead>
                         <tbody></tbody>

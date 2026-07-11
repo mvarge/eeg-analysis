@@ -1100,6 +1100,32 @@ main {
     margin-top: 2px;
 }
 
+/* Trial numbering: flanker task # (primary) + EEG recording # (secondary) */
+.excluded-table td.task-num {
+    font-weight: 600;
+}
+.excluded-table td.eeg-num {
+    color: var(--text-dim);
+    font-size: 0.82rem;
+}
+.excluded-table td.task-num-fallback {
+    font-weight: 400;
+    color: var(--text-dim);
+}
+.excluded-table td.task-num-fallback .fallback-mark {
+    color: #f59e0b;
+    margin-left: 1px;
+}
+
+/* Explanatory note under a section heading (e.g. Missing Trials) */
+.section-note {
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    margin: 0.2rem 0 0.8rem;
+    max-width: 68ch;
+    line-height: 1.4;
+}
+
 /* Charts grid */
 .charts-grid {
     display: grid;

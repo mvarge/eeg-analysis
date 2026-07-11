@@ -213,11 +213,74 @@ def _channel_payload(s: ChannelSummary) -> dict:
     }
 
 
-def _trial_row(t: TrialResult) -> dict:
-    """Trial payload for the frontend (rounded for JSON size)."""
+def _flanker_context(subject_id: str) -> tuple[dict, List[dict]]:
+    """Map EEG trials to canonical flanker task numbers and list missing trials.
+
+    Uses the per-block RT-alignment (``AlignmentResult.matched_pairs``) already
+    computed by ``_run_alignment``. Returns:
+
+      * ``flanker_map``: ``{id(TrialResult): task_number}`` for every EEG trial
+        that was paired to a behavioural (flanker) row. The task number is the
+        canonical 1-160 index derived from the flanker file's ``live_row``.
+      * ``missing_trials``: a list of dicts for behavioural (flanker) trials that
+        have NO matching EEG trial ("eeg data not found"), in task-number order.
+
+    Empty ``flanker_map`` / ``missing_trials`` when no behavioural data is loaded
+    (numbering then falls back to the EEG enumeration on the frontend).
+    """
+    flanker_map: dict = {}
+    missing: List[dict] = []
+    if subject_id not in _results or subject_id not in _behavioural:
+        return flanker_map, missing
+
+    result = _results[subject_id]
+    session = _behavioural[subject_id]
+    alignment = _alignment.get(subject_id, [])
+
+    for ar in alignment:
+        blk = ar.block
+        # Reproduce the exact ordering _run_alignment used so eeg_i lines up.
+        eeg_block = [t for t in result.trials if t.block == blk]
+        beh_block = [t for t in session.trials if t.block == blk]
+        for eeg_i, beh_i in ar.matched_pairs:
+            if 0 <= eeg_i < len(eeg_block) and 0 <= beh_i < len(beh_block):
+                tn = beh_block[beh_i].task_number
+                if tn is not None:
+                    flanker_map[id(eeg_block[eeg_i])] = tn
+        # Behavioural rows with no EEG match → "missing" (EEG data not found).
+        for beh_i in ar.unmatched_beh_indices:
+            if 0 <= beh_i < len(beh_block):
+                bt = beh_block[beh_i]
+                missing.append({
+                    "trial": bt.task_number,
+                    "btrial": (bt.live_row + 1) if bt.live_row is not None else None,
+                    "block": bt.block,
+                    "cond": "con" if bt.congruent else "inc",
+                    "condition": _condition_label("con" if bt.congruent else "inc"),
+                    "rt_ms": round(bt.response_time_ms, 1),
+                    "correct": bt.correct,
+                    "reason": "eeg data not found",
+                })
+
+    missing.sort(key=lambda m: (m["trial"] is None, m["trial"] or 0))
+    return flanker_map, missing
+
+
+def _trial_row(t: TrialResult, flanker_map: Optional[dict] = None) -> dict:
+    """Trial payload for the frontend (rounded for JSON size).
+
+    ``flanker_map`` (``{id(TrialResult): task_number}``) supplies the canonical
+    flanker task number when the trial was paired to a behavioural row. The EEG
+    enumeration (``trial``/``btrial``) is always kept so the analyst can still
+    locate the epoch in the raw EEG recording.
+    """
+    task_number = None
+    if flanker_map is not None:
+        task_number = flanker_map.get(id(t))
     return {
         "trial": t.trial,
         "btrial": t.btrial,
+        "task_number": task_number,
         "block": t.block,
         "cond": t.cond,
         "condition": _condition_label(t.cond),
@@ -719,12 +782,14 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
         # Behavioural was already reconciled before block selection (above).
         # If behavioural data was pre-loaded for this subject, run alignment.
         alignment = _run_alignment(result_id)
+        flanker_map, missing_trials = _flanker_context(result_id)
 
         return {
             "status": "success",
             "result_id": result_id,
             "summary": _summary_payload(result),
-            "trials": [_trial_row(t) for t in result.trials],
+            "trials": [_trial_row(t, flanker_map) for t in result.trials],
+            "missing_trials": missing_trials,
             "spectra": _spectra_payload(result),
             "source_files": [p.original for _, p in ordered],
             "warnings": parsed.warnings,
@@ -778,12 +843,14 @@ async def subject_results(result_id: str):
     result = _results[result_id]
     parsed = _parsed.get(result_id)
     alignment = _alignment.get(result_id, [])
+    flanker_map, missing_trials = _flanker_context(result_id)
 
     return {
         "status": "success",
         "result_id": result_id,
         "summary": _summary_payload(result),
-        "trials": [_trial_row(t) for t in result.trials],
+        "trials": [_trial_row(t, flanker_map) for t in result.trials],
+        "missing_trials": missing_trials,
         "spectra": _spectra_payload(result),
         "source_files": list(getattr(parsed, "source_files", [])) if parsed else [],
         "warnings": list(getattr(parsed, "warnings", [])) if parsed else [],
@@ -1169,6 +1236,7 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
 
     _behavioural[subject_id] = session
     alignment = _run_alignment(subject_id)
+    _, missing_trials = _flanker_context(subject_id)
 
     return {
         "status": "success",
@@ -1180,6 +1248,7 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
         "eeg_loaded": subject_id in _results,
         "alignment": [_alignment_payload(a) for a in alignment],
         "accuracy": _accuracy_payload(subject_id),
+        "missing_trials": missing_trials,
         "checks": _checks_payload_for(subject_id),
     }
 
@@ -1221,7 +1290,7 @@ async def compare_subjects():
             {
                 "result_id": rid,
                 "summary": _summary_payload(r),
-                "trials": [_trial_row(t) for t in r.trials],
+                "trials": [_trial_row(t, _flanker_context(rid)[0]) for t in r.trials],
             }
             for rid, r in _results.items()
         ]

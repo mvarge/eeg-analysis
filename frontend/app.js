@@ -729,6 +729,10 @@ function initBehaviouralUpload() {
                 if (currentResultId && data.subject_id === currentResultId) {
                     renderAlignmentPanel(data.alignment, data.accuracy);
                     renderChecksPanel(data.checks);
+                    // Trial numbering now uses flanker task numbers and the
+                    // missing-trials box may have populated — reload the full
+                    // results so every table reflects the new alignment.
+                    loadSubject(currentResultId);
                 }
             } catch (err) {
                 setBehaviouralStatus(`⚠ ${sid}: ${err.message || 'Upload failed'}`, false);
@@ -844,6 +848,7 @@ function showResults(data) {
     // Included + excluded trials tables
     populateIncludedTable(data.trials, blockOrder);
     populateExcludedTable(data.trials);
+    populateMissingTable(data.missing_trials);
 
     // Track this subject
     if (!uploadedSubjects.find(x => x.result_id === data.result_id)) {
@@ -1300,6 +1305,24 @@ function renderExclusionChart(containerId, trials, ch1Label, ch2Label) {
 // ── Included trials table ──
 // Mirror of the excluded table for trials that survived on BOTH channels.
 // The block column shows the refresh-rate label (e.g. "60 Hz") when known.
+//
+// Trial numbering (§Doc 5): the primary "Task #" is the canonical flanker task
+// number (1-160) obtained by matching each EEG epoch to its behavioural row via
+// RT alignment. When no behavioural (flanker) file is loaded — or a given trial
+// could not be matched — task_number is null and we fall back to the EEG
+// recording number, flagged so the analyst knows it is NOT the flanker number.
+// The EEG recording number is always shown in its own column so the analyst can
+// still locate the epoch in the raw recording.
+function trialNumCells(t) {
+    const eeg = t.trial;
+    if (t.task_number != null) {
+        return `<td class="task-num">${t.task_number}</td><td class="eeg-num">${eeg}</td>`;
+    }
+    // No flanker match: show EEG number as a fallback in the Task # column,
+    // marked so it is clearly not a flanker task number.
+    return `<td class="task-num task-num-fallback" title="No flanker match — showing EEG recording number, not a flanker task number">${eeg}<span class="fallback-mark">*</span></td><td class="eeg-num">${eeg}</td>`;
+}
+
 function populateIncludedTable(trials, blockOrder = {}) {
     const included = trials.filter(t => !t.fz_exclude && !t.c3_exclude);
     const section = document.getElementById('included-section');
@@ -1323,7 +1346,7 @@ function populateIncludedTable(trials, blockOrder = {}) {
         const blockLabel = hz ? `${t.block} · ${escapeHtml(hz)}` : `${t.block}`;
         return `
         <tr>
-            <td>${t.trial}</td>
+            ${trialNumCells(t)}
             <td>${blockLabel}</td>
             <td title="Raw seconds from LabChart file: ${onsetRaw}"><span class="onset-mm">${onsetLabel}</span><span class="onset-raw">${onsetRaw}s</span></td>
             <td>${t.condition}</td>
@@ -1359,7 +1382,7 @@ function populateExcludedTable(trials) {
         const onsetRaw = t.onset.toFixed(4);
         return `
         <tr>
-            <td>${t.trial}</td>
+            ${trialNumCells(t)}
             <td>${t.block}</td>
             <td title="Raw seconds from LabChart file: ${onsetRaw}"><span class="onset-mm">${onsetLabel}</span><span class="onset-raw">${onsetRaw}s</span></td>
             <td>${t.condition}</td>
@@ -1371,6 +1394,42 @@ function populateExcludedTable(trials) {
             <td class="${t.fz_exclude ? 'flag-yes' : 'flag-no'}">${t.fz_exclude ? '✕' : '·'}</td>
             <td class="${t.c3_exclude ? 'flag-yes' : 'flag-no'}">${t.c3_exclude ? '✕' : '·'}</td>
             <td>${t.reason}</td>
+        </tr>`;
+    }).join('');
+}
+
+// ── Missing trials table ──
+// Flanker (behavioural) trials that have no matching EEG epoch. Requires an
+// uploaded behavioural file; the box is hidden otherwise. Task numbers are the
+// canonical flanker numbers (1-160); reason is always "eeg data not found".
+function populateMissingTable(missing) {
+    const section = document.getElementById('missing-section');
+    const countEl = document.getElementById('missing-count');
+    const tbody = document.querySelector('#missing-table tbody');
+    if (!section || !tbody) return;
+
+    if (!missing || missing.length === 0) {
+        section.hidden = true;
+        tbody.innerHTML = '';
+        return;
+    }
+    section.hidden = false;
+    countEl.textContent = `(${missing.length})`;
+
+    tbody.innerHTML = missing.map(m => {
+        const task = m.trial != null ? m.trial : '—';
+        const blockNo = m.btrial != null ? m.btrial : '—';
+        const rt = (m.rt_ms != null) ? `${m.rt_ms} ms` : '—';
+        const correct = (m.correct === true) ? '✓' : (m.correct === false ? '✕' : '—');
+        return `
+        <tr>
+            <td class="task-num">${task}</td>
+            <td>${blockNo}</td>
+            <td>${m.block}</td>
+            <td>${escapeHtml(m.condition || '')}</td>
+            <td>${rt}</td>
+            <td class="${m.correct === false ? 'flag-yes' : 'flag-no'}">${correct}</td>
+            <td>${escapeHtml(m.reason || 'eeg data not found')}</td>
         </tr>`;
     }).join('');
 }
