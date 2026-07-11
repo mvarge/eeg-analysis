@@ -724,3 +724,49 @@ def reconstruct_epoch(
             "beta_band": list(BETA_BAND),
         }
     return out
+
+
+# ============================================================
+#  Whole-recording overview (for the "Raw EEG Data" viewer)
+# ============================================================
+# A downsampled view of the ENTIRE continuous recording so an analyst can see,
+# in one scrollable trace, which parts of the signal the pipeline actually used
+# (the epoch windows around each paired trial) versus everything it ignored, and
+# the accept/reject verdict of each analysed window. Like the epoch viewer this
+# is reconstructed on demand from the retained continuous signal; nothing is
+# precomputed or stored. The same 1 Hz high-pass as the analysis is applied so
+# the trace shows the signal that was analysed (and so slow DC drift doesn't
+# swamp a whole-recording y-axis). The signal is decimated to a target point
+# budget because Plotly/scattergl chokes on hundreds of thousands of points.
+
+def recording_overview(parsed: ParsedEEG, max_points: int = 12000) -> dict:
+    """Return a decimated whole-recording trace + sample-rate/time metadata.
+
+    Only the continuous signal + timeline is produced here; per-trial markers
+    and epoch-window spans are assembled by the server (which owns the analysed
+    TrialResult verdicts and the concat onset samples). Returns a dict with:
+      * ``fs``          — original sampling rate (Hz).
+      * ``decimation``  — stride used (1 = none).
+      * ``n_samples``   — original continuous length.
+      * ``duration_s``  — recording length in seconds.
+      * ``times_s``     — decimated time axis (s from recording start).
+      * ``fz`` / ``c3`` — decimated high-passed traces (µV).
+    """
+    raw_hp, fs = _highpassed_continuous(parsed)
+    data = raw_hp.get_data() * 1e6            # (2, n_samples) µV
+    fz_full, c3_full = data[0], data[1]
+    n_total = fz_full.shape[0]
+
+    decimation = max(1, int(np.ceil(n_total / max(1, max_points))))
+    idx = np.arange(0, n_total, decimation)
+    times_s = idx / fs
+
+    return {
+        "fs": float(fs),
+        "decimation": int(decimation),
+        "n_samples": int(n_total),
+        "duration_s": float(n_total / fs) if fs else 0.0,
+        "times_s": [round(float(t), 3) for t in times_s],
+        "fz": [round(float(v), 2) for v in fz_full[idx]],
+        "c3": [round(float(v), 2) for v in c3_full[idx]],
+    }

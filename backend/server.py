@@ -39,7 +39,7 @@ from pipeline import (
     BLINK_UV, BLINK_SLOW_HZ, BLINK_K, EMG_BETA, EMG_K, BURST_Z, BURST_IMPACT, COINC_Z,
     HP_HZ, WIN_S, PAD_S, REACH_S, THETA_BAND, BETA_BAND, TOTAL_BAND, FREQ_STEP,
     THETA_CYC, BETA_CYC,
-    run_pipeline, reconstruct_epoch,
+    run_pipeline, reconstruct_epoch, recording_overview,
 )
 from demographics import (
     Demographic, DISPLAY_FIELDS,
@@ -1145,6 +1145,99 @@ async def subject_epoch(result_id: str, trial: int, scalogram: bool = False):
             "blink_slow_hz": BLINK_SLOW_HZ,
         },
         "deviation": _epoch_deviation(result, tr),
+    }
+
+
+@app.get("/api/subjects/{result_id}/recording")
+async def subject_recording(result_id: str, max_points: int = 12000):
+    """Whole-recording overview for the "Raw EEG Data" viewer.
+
+    Returns a decimated view of the ENTIRE continuous signal plus the markers an
+    analyst needs to read it: block start/end spans, each paired trial's stimulus
+    onset and keypress (by condition), each trial's epoch window + padding buffer,
+    and whether that window was accepted or rejected per channel. The trace is
+    rebuilt on demand from the retained continuous signal (same 1 Hz high-pass as
+    the analysis) and decimated to ``max_points`` so the browser can render it.
+
+    Everything the pipeline did NOT analyse is simply the continuous signal
+    outside the returned epoch-window spans, so the frontend can grey it out.
+    """
+    if result_id not in _results:
+        raise HTTPException(404, f"Subject '{result_id}' not found. Upload it first.")
+    parsed = _parsed.get(result_id)
+    if parsed is None:
+        raise HTTPException(409, "Continuous signal for this subject is no longer in memory.")
+
+    result = _results[result_id]
+    max_points = max(1000, min(int(max_points), 40000))
+    overview = recording_overview(parsed, max_points=max_points)
+    fs = overview["fs"]
+
+    flanker_map, _ = _flanker_context(result_id)
+
+    # Map post-merge TrialResults back to their concat onset sample (parsed.trials
+    # is 1:1 with result.trials by `trial` number — verified). Build the per-trial
+    # markers + epoch-window spans in seconds so the frontend plots against the
+    # same time axis as the trace.
+    p_by_num = {t.trial: t for t in parsed.trials}
+    trials_out = []
+    for tr in result.trials:
+        p_trial = p_by_num.get(tr.trial)
+        if p_trial is None:
+            continue
+        onset_s = p_trial.onset_sample_concat / fs if fs else 0.0
+        # Epoch window + buffer, matching reconstruct_epoch's tmin/tmax.
+        win_start = onset_s
+        win_end = onset_s + WIN_S
+        buf_start = onset_s - PAD_S
+        buf_end = onset_s + WIN_S + PAD_S
+        # Keypress time relative to recording start (onset_s + reaction time).
+        keypress_s = (onset_s + tr.rt_ms / 1000.0) if (tr.rt_ms and tr.rt_ms > 0) else None
+        included = not tr.fz_exclude and not tr.c3_exclude
+        trials_out.append({
+            "trial": tr.trial,
+            "btrial": tr.btrial,
+            "task_number": flanker_map.get(id(tr)) if flanker_map else None,
+            "block": tr.block,
+            "cond": tr.cond,
+            "condition": _condition_label(tr.cond),
+            "onset_s": round(onset_s, 3),
+            "keypress_s": round(keypress_s, 3) if keypress_s is not None else None,
+            "win_start_s": round(win_start, 3),
+            "win_end_s": round(win_end, 3),
+            "buf_start_s": round(buf_start, 3),
+            "buf_end_s": round(buf_end, 3),
+            "included": included,
+            "fz_exclude": tr.fz_exclude,
+            "c3_exclude": tr.c3_exclude,
+            "reason": tr.reason,
+        })
+
+    # Block spans (first onset .. last keypress within each block).
+    blocks_out = []
+    by_block: dict = {}
+    for t in trials_out:
+        by_block.setdefault(t["block"], []).append(t)
+    for blk in sorted(by_block):
+        rows = by_block[blk]
+        start_s = min(r["onset_s"] for r in rows)
+        # Prefer last keypress; fall back to last onset.
+        ends = [r["keypress_s"] for r in rows if r["keypress_s"] is not None]
+        end_s = max(ends) if ends else max(r["onset_s"] for r in rows)
+        blocks_out.append({
+            "block": blk,
+            "start_s": round(start_s, 3),
+            "end_s": round(end_s, 3),
+            "n_trials": len(rows),
+        })
+
+    return {
+        "status": "success",
+        "result_id": result_id,
+        "overview": overview,
+        "trials": trials_out,
+        "blocks": blocks_out,
+        "window": {"win_s": WIN_S, "pad_s": PAD_S, "reach_s": REACH_S},
     }
 
 
