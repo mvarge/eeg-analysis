@@ -296,6 +296,156 @@ main {
     background: rgba(94, 234, 212, 0.05);
 }
 
+/* ── Staged files list (review before analysis) ── */
+.staging {
+    margin-top: 1.2rem;
+    padding: 1rem 1.2rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    animation: fadeUp 0.4s ease both;
+}
+.staging-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.8rem;
+}
+.staging-title {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text);
+    font-weight: 500;
+}
+.staging-count {
+    color: var(--text-dim);
+    font-weight: 400;
+}
+.staging-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+.staging-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+.staging-group {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.staging-group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.45rem 0.7rem;
+    background: rgba(255, 255, 255, 0.02);
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+}
+.staging-group-id {
+    color: var(--accent, #5eead4);
+    font-weight: 600;
+}
+.staging-group-meta {
+    color: var(--text-dim);
+    font-size: 0.68rem;
+}
+.staging-group.staging-failed {
+    border-color: rgba(248, 113, 113, 0.5);
+}
+.staging-group.staging-failed .staging-group-head {
+    background: rgba(248, 113, 113, 0.08);
+}
+.staging-group.staging-done {
+    border-color: rgba(94, 234, 212, 0.4);
+    opacity: 0.7;
+}
+.staging-file {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.4rem 0.7rem;
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text);
+}
+.staging-file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.staging-file-size {
+    color: var(--text-dim);
+    font-size: 0.66rem;
+    flex-shrink: 0;
+    margin-left: auto;
+    margin-right: 0.5rem;
+}
+.staging-file-remove {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 0.3rem;
+    flex-shrink: 0;
+    transition: color 0.15s;
+}
+.staging-file-remove:hover {
+    color: #f87171;
+}
+.staging-hint {
+    margin-top: 0.7rem;
+    color: var(--text-dim);
+    font-size: 0.68rem;
+    font-family: var(--font-mono);
+}
+
+/* ── Post-run upload summary ── */
+.upload-summary {
+    margin-top: 1.2rem;
+    padding: 1rem 1.2rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    animation: fadeUp 0.4s ease both;
+}
+.upload-summary-body {
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.upload-summary-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+.upload-summary-line.ok { color: var(--accent, #5eead4); }
+.upload-summary-line.fail { color: #f87171; }
+.upload-summary-line .us-detail {
+    color: var(--text-dim);
+    font-size: 0.7rem;
+}
+.upload-summary-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.9rem;
+    flex-wrap: wrap;
+}
+
 /* Participant profile panel inside individual view */
 .demographics-panel {
     background: var(--bg-card);

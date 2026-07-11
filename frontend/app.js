@@ -7,6 +7,7 @@ const API = window.location.origin;
 let currentResultId = null;
 let currentData = null;              // last upload's full response
 let uploadedSubjects = [];           // [{ result_id, filename }]
+let stagedFiles = [];                // File[] waiting to be analysed
 // Per-block card label mode: 'refresh' → "60 Hz block" (default when
 // demographics are known), 'block' → "Block 1/2" for validity checking.
 let powerBlockLabelMode = 'refresh';
@@ -121,11 +122,22 @@ function initUpload() {
         e.preventDefault();
         dropZone.classList.remove('drag-over');
         const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.txt'));
-        if (files.length > 0) uploadFiles(files);
+        if (files.length > 0) stageFiles(files);
     });
     fileInput.addEventListener('change', () => {
         const files = Array.from(fileInput.files).filter(f => f.name.endsWith('.txt'));
-        if (files.length > 0) uploadFiles(files);
+        if (files.length > 0) stageFiles(files);
+        fileInput.value = '';   // allow re-selecting the same file later
+    });
+
+    // Staging controls
+    document.getElementById('staging-add').addEventListener('click', () => fileInput.click());
+    document.getElementById('staging-clear').addEventListener('click', () => {
+        stagedFiles = [];
+        renderStaging();
+    });
+    document.getElementById('staging-analyze').addEventListener('click', () => {
+        if (stagedFiles.length > 0) uploadFiles(stagedFiles.slice());
     });
 
     // Demographics CSV
@@ -133,11 +145,84 @@ function initUpload() {
     initBehaviouralUpload();
     refreshDemographicsStatus();
 
+    // ── Stage files for review before analysis ──
+    // Files chosen/dropped are added to a reviewable list (deduped by
+    // name+size) rather than uploaded immediately, so the analyst can drop a
+    // stray non-recording export before it breaks a subject.
+    function stageFiles(files) {
+        document.getElementById('upload-summary').hidden = true;
+        errorEl.hidden = true;
+        for (const f of files) {
+            const dup = stagedFiles.some(s => s.name === f.name && s.size === f.size);
+            if (!dup) stagedFiles.push(f);
+        }
+        renderStaging();
+    }
+
+    // Group the staged files by canonical subject ID for display and upload.
+    function groupStaged() {
+        const groups = new Map();  // subject_id -> File[]
+        for (const f of stagedFiles) {
+            const sid = subjectIdFromFilename(f.name);
+            if (!groups.has(sid)) groups.set(sid, []);
+            groups.get(sid).push(f);
+        }
+        return groups;
+    }
+
+    function renderStaging() {
+        const staging = document.getElementById('staging');
+        const groupsEl = document.getElementById('staging-groups');
+        const countEl = document.getElementById('staging-count');
+        if (!stagedFiles.length) {
+            staging.hidden = true;
+            groupsEl.innerHTML = '';
+            countEl.textContent = '';
+            return;
+        }
+        staging.hidden = false;
+        const groups = groupStaged();
+        countEl.textContent = `(${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''}, ${groups.size} subject${groups.size > 1 ? 's' : ''})`;
+
+        groupsEl.innerHTML = Array.from(groups.entries()).map(([sid, group]) => {
+            const rows = group.map(f => `
+                <div class="staging-file">
+                    <span class="staging-file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+                    <span class="staging-file-size">${formatBytes(f.size)}</span>
+                    <button type="button" class="staging-file-remove" data-name="${escapeHtml(f.name)}" data-size="${f.size}" title="Remove file">×</button>
+                </div>`).join('');
+            return `
+            <div class="staging-group">
+                <div class="staging-group-head">
+                    <span class="staging-group-id">${escapeHtml(sid)}</span>
+                    <span class="staging-group-meta">${group.length} file${group.length > 1 ? 's' : ''}</span>
+                </div>
+                ${rows}
+            </div>`;
+        }).join('');
+
+        groupsEl.querySelectorAll('.staging-file-remove').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const name = btn.dataset.name;
+                const size = Number(btn.dataset.size);
+                stagedFiles = stagedFiles.filter(f => !(f.name === name && f.size === size));
+                renderStaging();
+            });
+        });
+    }
+    // Expose for the post-run summary retry handler.
+    initUpload._renderStaging = renderStaging;
+    initUpload._groupStaged = groupStaged;
+
     async function uploadFiles(files) {
         errorEl.hidden = true;
+        document.getElementById('upload-summary').hidden = true;
+        document.getElementById('staging').hidden = true;
         progress.hidden = false;
         const fill = progress.querySelector('.progress-fill');
         const progressText = progress.querySelector('.progress-text');
+        fill.classList.remove('indeterminate');
+        fill.style.width = '0%';
         fill.classList.add('indeterminate');
 
         // Group files by canonical subject ID so that e.g. S8P025(1).txt and
@@ -152,6 +237,8 @@ function initUpload() {
 
         let lastData = null;
         let count = 0;
+        const succeeded = [];   // subject IDs that processed OK this run
+        const failed = [];      // { sid, files: File[], message }
         const groupList = Array.from(groups.entries());
 
         for (let i = 0; i < groupList.length; i++) {
@@ -166,12 +253,13 @@ function initUpload() {
             try {
                 const resp = await fetch(`${API}/api/upload`, { method: 'POST', body: formData });
                 if (!resp.ok) {
-                    const err = await resp.json();
-                    throw new Error(`${label}: ${err.detail || 'Upload failed'}`);
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
                 }
                 const data = await resp.json();
                 lastData = data;
                 count++;
+                succeeded.push(sid);
 
                 if (!uploadedSubjects.find(s => s.result_id === data.result_id)) {
                     uploadedSubjects.push({
@@ -180,27 +268,95 @@ function initUpload() {
                     });
                 }
             } catch (err) {
-                fill.classList.remove('indeterminate');
-                progress.hidden = true;
-                errorEl.textContent = err.message;
-                errorEl.hidden = false;
-                return;
+                // Don't abort the whole run — record the failure, keep going,
+                // so subjects that DO parse are still available afterwards.
+                failed.push({ sid, files: group, message: err.message });
             }
         }
 
         fill.classList.remove('indeterminate');
         fill.style.width = '100%';
-        progressText.textContent = `Done! ${count} subject${count > 1 ? 's' : ''} processed.`;
+        progressText.textContent = `Done — ${count} succeeded, ${failed.length} failed.`;
 
+        // Keep only the failed files staged so they can be fixed and retried.
+        stagedFiles = failed.flatMap(f => f.files);
+
+        // If nothing at all succeeded and nothing had been uploaded before,
+        // just show the error(s) inline (nowhere useful to continue to).
+        const totalAvailable = uploadedSubjects.length;
+
+        if (failed.length === 0) {
+            // Clean run — go straight to results as before.
+            setTimeout(() => {
+                progress.hidden = true;
+                if (totalAvailable === 1) {
+                    showResults(lastData);
+                } else {
+                    document.getElementById('upload-section').hidden = true;
+                    showComparison();
+                }
+            }, 500);
+            return;
+        }
+
+        // Mixed / failed run — show a summary with an explicit way forward so
+        // the analyst is never stranded on the upload screen.
         setTimeout(() => {
-            if (count === 1) {
-                showResults(lastData);
+            progress.hidden = true;
+            showUploadSummary(succeeded, failed, totalAvailable, lastData);
+        }, 400);
+    }
+
+    function showUploadSummary(succeeded, failed, totalAvailable, lastData) {
+        const box = document.getElementById('upload-summary');
+        const body = document.getElementById('upload-summary-body');
+        const continueBtn = document.getElementById('upload-summary-continue');
+        const retryBtn = document.getElementById('upload-summary-retry');
+
+        const lines = [];
+        if (succeeded.length) {
+            lines.push(`<div class="upload-summary-line ok">✓ ${succeeded.length} subject${succeeded.length > 1 ? 's' : ''} processed: <span class="us-detail">${escapeHtml(succeeded.join(', '))}</span></div>`);
+        }
+        for (const f of failed) {
+            lines.push(`<div class="upload-summary-line fail">✕ ${escapeHtml(f.sid)} failed <span class="us-detail">${escapeHtml(f.message)}</span></div>`);
+        }
+        if (totalAvailable > 0) {
+            lines.push(`<div class="upload-summary-line"><span class="us-detail">${totalAvailable} subject${totalAvailable > 1 ? 's' : ''} available to view. Remove or fix the failed file(s) below and analyse again, or continue.</span></div>`);
+        } else {
+            lines.push(`<div class="upload-summary-line"><span class="us-detail">No subjects available yet. Remove the offending file(s) below and analyse again.</span></div>`);
+        }
+        body.innerHTML = lines.join('');
+
+        // "Continue" only makes sense if there's something to view.
+        continueBtn.hidden = totalAvailable === 0;
+        continueBtn.onclick = () => {
+            box.hidden = true;
+            if (totalAvailable === 1) {
+                if (lastData) showResults(lastData);
+                else loadSubject(uploadedSubjects[0].result_id);
             } else {
                 document.getElementById('upload-section').hidden = true;
                 showComparison();
             }
-        }, 600);
+        };
+
+        retryBtn.hidden = stagedFiles.length === 0;
+        retryBtn.onclick = () => {
+            box.hidden = true;
+            if (initUpload._renderStaging) initUpload._renderStaging();
+        };
+
+        box.hidden = false;
+        // Re-show the staging list (now holding only the failed files).
+        if (initUpload._renderStaging) initUpload._renderStaging();
     }
+}
+
+// Human-readable file size.
+function formatBytes(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // Canonical subject ID from an uploaded filename.
@@ -1465,7 +1621,10 @@ function goToUpload() {
     document.getElementById('compare-section').hidden = true;
     document.getElementById('upload-section').hidden = false;
     document.getElementById('upload-progress').hidden = true;
+    document.getElementById('upload-summary').hidden = true;
     document.getElementById('file-input').value = '';
+    // Reflect any files still staged (e.g. after a partial-failure run).
+    if (initUpload._renderStaging) initUpload._renderStaging();
 }
 
 // ── Session persistence ──
@@ -1545,6 +1704,7 @@ function initActions() {
         uploadedSubjects = [];
         currentResultId = null;
         currentData = null;
+        stagedFiles = [];
         clearSession();
         goToUpload();
     });

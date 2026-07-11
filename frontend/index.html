@@ -41,11 +41,35 @@
                 <p class="upload-hint">Drop one file for individual analysis, or multiple for group comparison</p>
                 <input type="file" id="file-input" accept=".txt" multiple hidden>
             </div>
+
+            <!-- Staged files (reviewable before analysis) -->
+            <div id="staging" class="staging" hidden>
+                <div class="staging-header">
+                    <span class="staging-title">Files to analyse <span class="staging-count" id="staging-count"></span></span>
+                    <div class="staging-actions">
+                        <button type="button" id="staging-add" class="btn-ghost">Add more</button>
+                        <button type="button" id="staging-clear" class="btn-ghost">Clear all</button>
+                        <button type="button" id="staging-analyze" class="btn-primary btn-sm">Analyse</button>
+                    </div>
+                </div>
+                <div id="staging-groups" class="staging-groups"></div>
+                <p class="staging-hint">Grouped by subject ID. Remove any file that shouldn't be analysed (e.g. a non-recording export) before analysing.</p>
+            </div>
+
             <div id="upload-progress" class="progress-bar" hidden>
                 <div class="progress-fill"></div>
                 <span class="progress-text">Processing...</span>
             </div>
             <div id="upload-error" class="error-msg" hidden></div>
+
+            <!-- Post-run summary: shown when some subjects succeed and/or fail -->
+            <div id="upload-summary" class="upload-summary" hidden>
+                <div id="upload-summary-body" class="upload-summary-body"></div>
+                <div class="upload-summary-actions">
+                    <button type="button" id="upload-summary-continue" class="btn-primary btn-sm">Continue to results</button>
+                    <button type="button" id="upload-summary-retry" class="btn-ghost" hidden>Review failed files</button>
+                </div>
+            </div>
 
             <!-- Demographics (optional) -->
             <div class="demographics-upload">
