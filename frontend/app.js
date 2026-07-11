@@ -753,6 +753,8 @@ function showResults(data) {
 
     document.getElementById('upload-section').hidden = true;
     document.getElementById('results-section').hidden = false;
+    document.getElementById('refresh-section').hidden = true;
+    document.getElementById('compare-section').hidden = true;
 
     // Info bar
     document.getElementById('info-filename').textContent = s.filename;
@@ -1473,6 +1475,7 @@ async function showComparison() {
         document.getElementById('results-section').hidden = true;
         document.getElementById('compare-section').hidden = false;
         document.getElementById('upload-section').hidden = true;
+        document.getElementById('refresh-section').hidden = true;
         saveSession({ view: 'compare' });
 
         // Table
@@ -1619,6 +1622,7 @@ function renderEffectChart(containerId, subjects) {
 function goToUpload() {
     document.getElementById('results-section').hidden = true;
     document.getElementById('compare-section').hidden = true;
+    document.getElementById('refresh-section').hidden = true;
     document.getElementById('upload-section').hidden = false;
     document.getElementById('upload-progress').hidden = true;
     document.getElementById('upload-summary').hidden = true;
@@ -1626,6 +1630,252 @@ function goToUpload() {
     // Reflect any files still staged (e.g. after a partial-failure run).
     if (initUpload._renderStaging) initUpload._renderStaging();
 }
+
+// ── Refresh-rate comparison (60 Hz vs 165 Hz) ──
+// Holds the last-fetched payload so the provenance modal can look up the exact
+// numbers behind a clicked chart.
+let refreshData = null;
+
+async function showRefreshComparison() {
+    let data;
+    try {
+        const resp = await fetch(`${API}/api/refresh-comparison`);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            alert(err.detail || 'Refresh-rate comparison failed');
+            return;
+        }
+        data = await resp.json();
+    } catch (err) {
+        alert('Error loading refresh-rate comparison: ' + err.message);
+        return;
+    }
+    refreshData = data;
+
+    document.getElementById('results-section').hidden = true;
+    document.getElementById('compare-section').hidden = true;
+    document.getElementById('upload-section').hidden = true;
+    document.getElementById('refresh-section').hidden = false;
+    saveSession({ view: 'refresh' });
+
+    // Warn if some subjects couldn't be assigned a refresh rate.
+    const warnEl = document.getElementById('refresh-warning');
+    const missing = data.n_subjects - data.n_with_refresh_order;
+    if (missing > 0) {
+        warnEl.hidden = false;
+        warnEl.textContent = `⚠ ${missing} of ${data.n_subjects} subject(s) have no demographics refresh-rate ordering and are excluded from this comparison. Upload a matching demographics CSV to include them.`;
+    } else {
+        warnEl.hidden = true;
+    }
+
+    renderRefreshMeasures(data.measures);
+}
+
+function renderRefreshMeasures(measures) {
+    const wrap = document.getElementById('refresh-measures');
+    wrap.innerHTML = measures.map((m, i) => {
+        const g = m.group;
+        const dp = m.decimals;
+        const diffLabel = m.diff_label || '165 Hz − 60 Hz';
+
+        // Headline group summary.
+        const groupHtml = g.n === 0
+            ? `<div class="refresh-group-empty">No participant has both refresh conditions yet.</div>`
+            : `
+            <div class="refresh-group">
+                <div class="rg-stat"><span class="rg-num">${fmtNum(g.mean_diff, dp)}</span><span class="rg-lab">mean Δ</span></div>
+                <div class="rg-stat"><span class="rg-num">${fmtNum(g.median_diff, dp)}</span><span class="rg-lab">median Δ</span></div>
+                <div class="rg-stat"><span class="rg-num">${g.sd_diff == null ? '—' : fmtNum(g.sd_diff, dp)}</span><span class="rg-lab">SD</span></div>
+                <div class="rg-stat"><span class="rg-num">${g.ci95_lo == null ? '—' : `${fmtNum(g.ci95_lo, dp)}…${fmtNum(g.ci95_hi, dp)}`}</span><span class="rg-lab">95% CI</span></div>
+                <div class="rg-stat"><span class="rg-num">${g.n}</span><span class="rg-lab">participants</span></div>
+            </div>`;
+
+        // Per-participant table.
+        const rows = m.participants.map(p => {
+            const lo = p.conditions[m.rate_low];
+            const hi = p.conditions[m.rate_high];
+            if (!p.has_both) {
+                const note = p.note || 'only one refresh condition present';
+                return `<tr class="rr-incomplete">
+                    <td>${escapeHtml(p.filename)}</td>
+                    <td>${lo ? fmtNum(lo.mean, dp) : '—'}</td>
+                    <td>${hi ? fmtNum(hi.mean, dp) : '—'}</td>
+                    <td>—</td>
+                    <td class="rr-note" colspan="1">${escapeHtml(note)}</td>
+                </tr>`;
+            }
+            const dirClass = p.diff > 0 ? 'rr-up' : (p.diff < 0 ? 'rr-down' : '');
+            return `<tr>
+                <td>${escapeHtml(p.filename)}</td>
+                <td>${fmtNum(lo.mean, dp)} <span class="rr-n">n=${lo.n}</span></td>
+                <td>${fmtNum(hi.mean, dp)} <span class="rr-n">n=${hi.n}</span></td>
+                <td class="${dirClass}">${p.diff > 0 ? '+' : ''}${fmtNum(p.diff, dp)}</td>
+                <td></td>
+            </tr>`;
+        }).join('');
+
+        return `
+        <div class="refresh-measure" data-measure="${m.key}">
+            <div class="refresh-measure-head">
+                <div>
+                    <h3>${escapeHtml(m.label)}</h3>
+                    <span class="refresh-measure-sub">${escapeHtml(m.channel)}${m.band ? ' · ' + escapeHtml(m.band) : ''} · unit: ${escapeHtml(m.unit)}</span>
+                </div>
+                <button class="btn-ghost btn-sm refresh-prov-btn" data-measure="${m.key}">How was this computed?</button>
+            </div>
+            ${groupHtml}
+            <div class="refresh-chart" id="refresh-chart-${m.key}"
+                 role="button" tabindex="0" title="Click to see the computation trace"></div>
+            <div class="compare-table-wrap">
+                <table class="compare-table refresh-table">
+                    <thead><tr>
+                        <th>Participant</th>
+                        <th>${escapeHtml(m.rate_low || 'lower')}</th>
+                        <th>${escapeHtml(m.rate_high || 'higher')}</th>
+                        <th>Δ (${escapeHtml(diffLabel)})</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </div>`;
+    }).join('');
+
+    // Draw charts + wire click-to-provenance.
+    measures.forEach(m => {
+        drawRefreshChart(`refresh-chart-${m.key}`, m);
+        const chartEl = document.getElementById(`refresh-chart-${m.key}`);
+        const open = () => openProvenance(m.key);
+        chartEl.addEventListener('click', open);
+        chartEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+        });
+    });
+    wrap.querySelectorAll('.refresh-prov-btn').forEach(btn => {
+        btn.addEventListener('click', () => openProvenance(btn.dataset.measure));
+    });
+}
+
+// Grouped bar: per participant, the two refresh-condition means side by side.
+function drawRefreshChart(containerId, m) {
+    const complete = m.participants.filter(p => p.has_both);
+    if (!complete.length) {
+        document.getElementById(containerId).innerHTML =
+            '<div class="refresh-chart-empty">Need at least one participant with both 60 Hz and 165 Hz conditions to plot.</div>';
+        return;
+    }
+    const names = complete.map(p => p.filename);
+    const lo = complete.map(p => p.conditions[m.rate_low].mean);
+    const hi = complete.map(p => p.conditions[m.rate_high].mean);
+
+    const traces = [
+        {
+            type: 'bar', name: m.rate_low, x: names, y: lo,
+            marker: { color: CON_COLOR },
+            hovertemplate: `%{x}<br>${m.rate_low}: %{y}<extra></extra>`,
+        },
+        {
+            type: 'bar', name: m.rate_high, x: names, y: hi,
+            marker: { color: INC_COLOR },
+            hovertemplate: `%{x}<br>${m.rate_high}: %{y}<extra></extra>`,
+        },
+    ];
+    const layout = {
+        ...plotlyLayout,
+        barmode: 'group',
+        height: 260,
+        margin: { t: 10, r: 15, b: 55, l: 55 },
+        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: m.unit, font: { size: 10 } } },
+    };
+    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
+}
+
+// ── Provenance modal ──
+function openProvenance(measureKey) {
+    if (!refreshData) return;
+    const m = refreshData.measures.find(x => x.key === measureKey);
+    if (!m) return;
+    const dp = m.decimals;
+
+    document.getElementById('prov-title').textContent = `${m.label} — computation trace`;
+
+    const stagesHtml = (m.provenance.stages || []).map(s => {
+        const vals = Object.entries(s.values || {});
+        const valHtml = vals.length
+            ? `<div class="prov-values">${vals.map(([k, v]) =>
+                `<span class="prov-kv"><span class="pk">${escapeHtml(k)}</span> = <span class="pv">${escapeHtml(fmtProvVal(v))}</span></span>`).join('')}</div>`
+            : '';
+        const badge = s.retained
+            ? '<span class="prov-badge kept">value retained</span>'
+            : '<span class="prov-badge discarded">intermediate not retained</span>';
+        return `<li class="prov-stage">
+            <div class="prov-stage-head"><span class="prov-stage-name">${escapeHtml(s.stage)}</span>${badge}</div>
+            <div class="prov-stage-detail">${escapeHtml(s.detail)}</div>
+            ${valHtml}
+        </li>`;
+    }).join('');
+
+    // Per-participant worked example: the actual numbers behind the plot.
+    const complete = m.participants.filter(p => p.has_both);
+    let exampleHtml = '';
+    if (complete.length) {
+        const rows = complete.map(p => {
+            const lo = p.conditions[m.rate_low];
+            const hi = p.conditions[m.rate_high];
+            return `<tr>
+                <td>${escapeHtml(p.filename)}</td>
+                <td>${fmtNum(lo.mean, dp)} <span class="rr-n">(mean of ${lo.n})</span></td>
+                <td>${fmtNum(hi.mean, dp)} <span class="rr-n">(mean of ${hi.n})</span></td>
+                <td>${p.diff > 0 ? '+' : ''}${fmtNum(p.diff, dp)}</td>
+            </tr>`;
+        }).join('');
+        const g = m.group;
+        exampleHtml = `
+        <h4 class="prov-h4">Worked values for this measure</h4>
+        <div class="compare-table-wrap">
+            <table class="compare-table refresh-table">
+                <thead><tr>
+                    <th>Participant</th><th>${escapeHtml(m.rate_low)} mean</th>
+                    <th>${escapeHtml(m.rate_high)} mean</th><th>Δ</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <div class="prov-headline">
+            Group: mean Δ = <strong>${fmtNum(g.mean_diff, dp)}</strong>,
+            median Δ = <strong>${fmtNum(g.median_diff, dp)}</strong>,
+            SD = ${g.sd_diff == null ? '—' : fmtNum(g.sd_diff, dp)},
+            95% CI = ${g.ci95_lo == null ? '—' : `[${fmtNum(g.ci95_lo, dp)}, ${fmtNum(g.ci95_hi, dp)}]`},
+            N = ${g.n}.
+        </div>`;
+    }
+
+    document.getElementById('prov-body').innerHTML = `
+        <p class="prov-lead">The ordered path from raw signal to the plotted
+        ${escapeHtml(m.diff_label || '165 Hz − 60 Hz')} value. Stages marked
+        "value retained" expose the actual numbers used; those marked
+        "intermediate not retained" were computed in the pipeline but not stored.</p>
+        <ol class="prov-stages">${stagesHtml}</ol>
+        ${exampleHtml}`;
+
+    document.getElementById('provenance-modal').hidden = false;
+}
+
+function closeProvenance() {
+    document.getElementById('provenance-modal').hidden = true;
+}
+
+function fmtProvVal(v) {
+    if (Array.isArray(v)) return `[${v.join(', ')}]`;
+    return String(v);
+}
+
+function fmtNum(v, dp) {
+    if (v == null || Number.isNaN(v)) return '—';
+    return Number(v).toFixed(dp);
+}
+
 
 // ── Session persistence ──
 // The backend keeps parsed results in memory (until it restarts), so on a page
@@ -1676,6 +1926,11 @@ async function restoreSession() {
         showComparison();
         return;
     }
+    if (sess.view === 'refresh') {
+        updateCompareButton();
+        showRefreshComparison();
+        return;
+    }
     // Individual view: prefer the last-open subject, else the first available.
     const target = (sess.subjectId && stillHere(sess.subjectId))
         ? sess.subjectId
@@ -1696,6 +1951,8 @@ function initActions() {
     });
     document.getElementById('btn-add-subject').addEventListener('click', () => goToUpload());
     document.getElementById('btn-compare').addEventListener('click', () => showComparison());
+    document.getElementById('btn-refresh-view').addEventListener('click', () => showRefreshComparison());
+    document.getElementById('btn-refresh-from-compare').addEventListener('click', () => showRefreshComparison());
 
     document.getElementById('btn-new').addEventListener('click', async () => {
         for (const s of uploadedSubjects) {
@@ -1714,6 +1971,32 @@ function initActions() {
         document.getElementById('results-section').hidden = false;
     });
 
+    // Refresh-rate view navigation
+    document.getElementById('btn-refresh-back').addEventListener('click', () => {
+        document.getElementById('refresh-section').hidden = true;
+        if (uploadedSubjects.length >= 2) {
+            showComparison();
+        } else {
+            document.getElementById('results-section').hidden = false;
+        }
+    });
+    document.getElementById('btn-refresh-add-more').addEventListener('click', () => {
+        document.getElementById('refresh-section').hidden = true;
+        goToUpload();
+    });
+    document.getElementById('btn-refresh-download').addEventListener('click', () => {
+        window.location.href = `${API}/api/download-csv-refresh`;
+    });
+
+    // Provenance modal close (button, overlay click, Escape)
+    document.getElementById('prov-close').addEventListener('click', closeProvenance);
+    document.getElementById('provenance-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'provenance-modal') closeProvenance();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeProvenance();
+    });
+
     document.getElementById('btn-download-all').addEventListener('click', () => {
         window.location.href = `${API}/api/download-csv-all`;
     });
@@ -1729,6 +2012,7 @@ function initActions() {
         e.preventDefault();
         document.getElementById('compare-section').hidden = true;
         document.getElementById('results-section').hidden = true;
+        document.getElementById('refresh-section').hidden = true;
         goToUpload();
     });
 }

@@ -1498,4 +1498,260 @@ footer p {
     .charts-grid { grid-template-columns: 1fr; }
     .chart-panel.full-width { grid-column: 1; }
     h1 { font-size: 1.3rem; }
+    .refresh-group { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ── Refresh-rate comparison view (60 vs 165 Hz) ── */
+.section-header-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.refresh-intro {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin-bottom: 1rem;
+    max-width: 70ch;
+}
+.refresh-intro strong { color: var(--accent, #5eead4); }
+.refresh-warning {
+    background: rgba(251, 202, 4, 0.08);
+    border: 1px solid rgba(251, 202, 4, 0.4);
+    color: #fbca04;
+    border-radius: var(--radius);
+    padding: 0.7rem 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    margin-bottom: 1.2rem;
+}
+.refresh-measures {
+    display: flex;
+    flex-direction: column;
+    gap: 1.6rem;
+}
+.refresh-measure {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 1.2rem 1.3rem;
+    animation: fadeUp 0.4s ease both;
+}
+.refresh-measure-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+.refresh-measure-head h3 {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    color: var(--text);
+}
+.refresh-measure-sub {
+    display: block;
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    margin-top: 0.2rem;
+}
+.refresh-prov-btn { cursor: pointer; white-space: nowrap; }
+
+.refresh-group {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0.6rem;
+    margin-bottom: 1.1rem;
+    padding: 0.9rem 1rem;
+    background: rgba(94, 234, 212, 0.04);
+    border: 1px solid rgba(94, 234, 212, 0.18);
+    border-radius: var(--radius);
+}
+.rg-stat { display: flex; flex-direction: column; gap: 0.2rem; }
+.rg-num {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
+    color: var(--accent, #5eead4);
+    font-weight: 600;
+}
+.rg-lab {
+    font-size: 0.66rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.refresh-group-empty {
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    margin-bottom: 1rem;
+}
+.refresh-chart {
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    transition: border-color 0.15s, background 0.15s;
+    margin-bottom: 1rem;
+    min-height: 40px;
+}
+.refresh-chart:hover, .refresh-chart:focus {
+    border-color: rgba(94, 234, 212, 0.35);
+    background: rgba(94, 234, 212, 0.03);
+    outline: none;
+}
+.refresh-chart-empty {
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    padding: 1rem;
+    text-align: center;
+}
+.refresh-table .rr-n {
+    color: var(--text-dim);
+    font-size: 0.66rem;
+}
+.refresh-table .rr-up { color: #f472b6; }
+.refresh-table .rr-down { color: #5eead4; }
+.refresh-table tr.rr-incomplete { opacity: 0.6; }
+.refresh-table .rr-note {
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 0.7rem;
+}
+
+/* ── Provenance modal ── */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(6, 8, 12, 0.72);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 2rem 1rem;
+    animation: fadeUp 0.2s ease both;
+}
+.modal-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    max-width: 720px;
+    width: 100%;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.3rem;
+    border-bottom: 1px solid var(--border);
+}
+.modal-head h3 {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    color: var(--text);
+}
+.modal-close {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    transition: color 0.15s;
+}
+.modal-close:hover { color: var(--accent, #5eead4); }
+.modal-body {
+    padding: 1.2rem 1.3rem;
+    overflow-y: auto;
+}
+.prov-lead {
+    color: var(--text-dim);
+    font-size: 0.76rem;
+    line-height: 1.5;
+    margin-bottom: 1.1rem;
+}
+.prov-stages {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+}
+.prov-stage {
+    border-left: 2px solid rgba(94, 234, 212, 0.35);
+    padding: 0.3rem 0 0.3rem 0.9rem;
+}
+.prov-stage-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+.prov-stage-name {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text);
+    font-weight: 600;
+}
+.prov-badge {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+}
+.prov-badge.kept { background: rgba(94, 234, 212, 0.12); color: #5eead4; }
+.prov-badge.discarded { background: rgba(160, 160, 180, 0.12); color: var(--text-dim); }
+.prov-stage-detail {
+    color: var(--text-dim);
+    font-size: 0.73rem;
+    line-height: 1.5;
+    margin-top: 0.3rem;
+}
+.prov-values {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+}
+.prov-kv {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.15rem 0.4rem;
+    color: var(--text-dim);
+}
+.prov-kv .pk { color: var(--text); }
+.prov-kv .pv { color: var(--accent, #5eead4); }
+.prov-h4 {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text);
+    margin: 0.5rem 0 0.6rem;
+}
+.prov-headline {
+    margin-top: 0.8rem;
+    padding: 0.7rem 0.9rem;
+    background: rgba(94, 234, 212, 0.05);
+    border: 1px solid rgba(94, 234, 212, 0.18);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+}
+.prov-headline strong { color: var(--accent, #5eead4); }

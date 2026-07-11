@@ -36,8 +36,9 @@ from parser import parse_labchart, parse_labchart_multi, ParsedEEG
 from subject_id import parse_filename as parse_upload_filename
 from pipeline import (
     PipelineResult, TrialResult, ChannelSummary,
-    BLINK_UV, BLINK_SLOW_HZ, BLINK_K, EMG_BETA, BURST_Z, BURST_IMPACT, COINC_Z,
-    HP_HZ, WIN_S, PAD_S, THETA_BAND, BETA_BAND, TOTAL_BAND,
+    BLINK_UV, BLINK_SLOW_HZ, BLINK_K, EMG_BETA, EMG_K, BURST_Z, BURST_IMPACT, COINC_Z,
+    HP_HZ, WIN_S, PAD_S, THETA_BAND, BETA_BAND, TOTAL_BAND, FREQ_STEP,
+    THETA_CYC, BETA_CYC,
     run_pipeline,
 )
 from demographics import (
@@ -258,6 +259,329 @@ def _spectra_payload(r: PipelineResult) -> dict:
         "theta_per_trial":   round_matrix(r.theta_spec_all),
         "beta_per_trial":    round_matrix(r.beta_spec_all),
     }
+
+
+# ============================================================
+#  Refresh-rate comparison (Issues & Changes 4)
+# ============================================================
+# The reviewer's primary question is whether EEG activity and reaction time
+# differ between the 60 Hz and 165 Hz refresh-rate conditions. The three
+# measures of interest are:
+#   - theta_rel : Fz-Pz theta relative power   (included = fz_exclude == False)
+#   - beta_rel  : C3-C4 beta relative power     (included = c3_exclude == False)
+#   - rt_ms     : reaction time                 (included = rt_ms > 0)
+#
+# Per participant we aggregate the included trials in each refresh condition
+# with the MEAN (natural for RT and matching the reviewer's "how much does each
+# measure change on average" framing), take the (higher − lower) refresh-rate
+# difference, then summarise those per-participant differences across the
+# sample. Refresh rate is derived from the demographics block_order label, not
+# block number, so counterbalanced participants are handled correctly.
+
+_REFRESH_MEASURES = {
+    "theta_rel": {
+        "label": "Fz–Pz theta relative power",
+        "channel": "Fz-Pz",
+        "band": "theta (4–8 Hz)",
+        "unit": "relative power",
+        "exclude_attr": "fz_exclude",
+        "value_attr": "theta_rel",
+        "decimals": 4,
+    },
+    "beta_rel": {
+        "label": "C3–C4 beta relative power",
+        "channel": "C3-C4",
+        "band": "beta (13–30 Hz)",
+        "unit": "relative power",
+        "exclude_attr": "c3_exclude",
+        "value_attr": "beta_rel",
+        "decimals": 4,
+    },
+    "rt_ms": {
+        "label": "Reaction time",
+        "channel": "behavioural",
+        "band": None,
+        "unit": "ms",
+        "exclude_attr": None,          # RT is not tied to a channel
+        "value_attr": "rt_ms",
+        "decimals": 1,
+    },
+}
+
+
+def _hz_sort_key(label: str) -> float:
+    """Numeric Hz for ordering refresh-rate labels ('60 Hz' -> 60.0)."""
+    m = re.search(r"(\d+(?:\.\d+)?)", label or "")
+    return float(m.group(1)) if m else float("inf")
+
+
+def _block_hz_map(filename: str) -> Dict[int, str]:
+    """Block-number -> refresh-rate label from matched demographics.
+
+    Returns {} when demographics are absent/unmatched or block_order is empty,
+    in which case the subject cannot be split by refresh rate.
+    """
+    if not _demographics:
+        return {}
+    demo = match_demographics(filename, _demographics)
+    if demo is None or not demo.block_order:
+        return {}
+    return dict(demo.block_order)
+
+
+def _measure_trial_included(t: TrialResult, spec: dict) -> bool:
+    if spec["value_attr"] == "rt_ms":
+        return t.rt_ms is not None and t.rt_ms > 0
+    return not bool(getattr(t, spec["exclude_attr"]))
+
+
+def _group_stats(diffs: List[float]) -> dict:
+    """Mean/median/spread of the per-participant differences (the headline)."""
+    arr = np.asarray(diffs, dtype=float)
+    n = int(arr.size)
+    out = {
+        "n": n,
+        "mean_diff": None, "median_diff": None,
+        "sd_diff": None, "sem_diff": None,
+        "ci95_lo": None, "ci95_hi": None,
+    }
+    if n == 0:
+        return out
+    mean = float(np.mean(arr))
+    out["mean_diff"] = mean
+    out["median_diff"] = float(np.median(arr))
+    if n >= 2:
+        sd = float(np.std(arr, ddof=1))
+        sem = sd / math.sqrt(n)
+        out["sd_diff"] = sd
+        out["sem_diff"] = sem
+        try:
+            from scipy import stats as _stats
+            tcrit = float(_stats.t.ppf(0.975, n - 1))
+        except Exception:
+            tcrit = 1.96
+        out["ci95_lo"] = mean - tcrit * sem
+        out["ci95_hi"] = mean + tcrit * sem
+    return out
+
+
+def _refresh_measure_payload(measure_key: str) -> dict:
+    """Build the per-participant + group payload for one measure."""
+    spec = _REFRESH_MEASURES[measure_key]
+    dp = spec["decimals"]
+
+    participants = []
+    diffs = []
+    vals_low = []
+    vals_high = []
+    rate_labels = set()
+
+    for rid, r in _results.items():
+        hz_map = _block_hz_map(r.filename)
+        entry = {
+            "result_id": rid,
+            "filename": r.filename,
+            "has_both": False,
+            "conditions": {},     # hz_label -> {mean, n, trials:[...]}
+            "diff": None,
+            "note": None,
+        }
+        if not hz_map:
+            entry["note"] = "no demographics block order — cannot assign refresh rate"
+            participants.append(entry)
+            continue
+
+        # Skip a channel-excluded band entirely (its power is invalid).
+        if measure_key in ("theta_rel", "beta_rel"):
+            chan_sum = r.theta_summary if measure_key == "theta_rel" else r.beta_summary
+            if getattr(chan_sum, "channel_excluded", False):
+                entry["note"] = f"{spec['channel']} channel excluded — {chan_sum.exclusion_reason or 'contamination'}"
+                participants.append(entry)
+                continue
+
+        # Group included trials by refresh-rate label.
+        by_rate: Dict[str, list] = {}
+        for t in r.trials:
+            label = hz_map.get(t.block)
+            if not label:
+                continue
+            if not _measure_trial_included(t, spec):
+                continue
+            val = getattr(t, spec["value_attr"])
+            by_rate.setdefault(label, []).append((t.trial, t.block, float(val)))
+
+        for label, rows in by_rate.items():
+            rate_labels.add(label)
+            values = [v for _, _, v in rows]
+            entry["conditions"][label] = {
+                "mean": round(float(np.mean(values)), dp),
+                "n": len(values),
+                "trials": [
+                    {"trial": tr, "block": bk, "value": round(v, dp)}
+                    for tr, bk, v in rows
+                ],
+            }
+
+        if len(entry["conditions"]) >= 2:
+            entry["has_both"] = True
+        participants.append(entry)
+
+    # Resolve the two refresh rates present, ordered low -> high.
+    ordered_rates = sorted(rate_labels, key=_hz_sort_key)
+    low = ordered_rates[0] if ordered_rates else None
+    high = ordered_rates[-1] if len(ordered_rates) >= 2 else None
+
+    # Compute per-participant differences (high − low) where both exist.
+    for entry in participants:
+        conds = entry["conditions"]
+        if low and high and low in conds and high in conds:
+            d = round(conds[high]["mean"] - conds[low]["mean"], dp)
+            entry["diff"] = d
+            diffs.append(d)
+            vals_low.append(conds[low]["mean"])
+            vals_high.append(conds[high]["mean"])
+            entry["has_both"] = True
+        else:
+            entry["has_both"] = False
+
+    group = _group_stats(diffs)
+    if vals_low:
+        group["mean_low"] = round(float(np.mean(vals_low)), dp)
+        group["mean_high"] = round(float(np.mean(vals_high)), dp)
+    # Round the group diff stats to a sensible precision.
+    for k in ("mean_diff", "median_diff", "sd_diff", "sem_diff", "ci95_lo", "ci95_hi"):
+        if group.get(k) is not None:
+            group[k] = round(group[k], dp)
+
+    return {
+        "key": measure_key,
+        "label": spec["label"],
+        "channel": spec["channel"],
+        "band": spec["band"],
+        "unit": spec["unit"],
+        "decimals": dp,
+        "rate_low": low,
+        "rate_high": high,
+        "diff_label": (f"{high} − {low}" if low and high else None),
+        "participants": participants,
+        "group": group,
+        "provenance": _measure_provenance(measure_key, low, high),
+    }
+
+
+def _measure_provenance(measure_key: str, low: str, high: str) -> dict:
+    """The ordered processing chain from raw signal to the plotted number.
+
+    Real, retained pipeline constants and stage descriptions for this measure.
+    Per-participant intermediate values are attached to each participant entry
+    (their included trials + condition means + difference); this block gives the
+    stage sequence and the config values shared by every participant.
+    """
+    is_power = measure_key in ("theta_rel", "beta_rel")
+    band = "theta" if measure_key == "theta_rel" else "beta"
+    num_band = list(THETA_BAND) if band == "theta" else list(BETA_BAND)
+    cyc = THETA_CYC if band == "theta" else BETA_CYC
+    chan = "Fz-Pz" if measure_key == "theta_rel" else "C3-C4"
+    excl_flag = "fz_exclude" if measure_key == "theta_rel" else "c3_exclude"
+
+    stages = []
+    stages.append({
+        "stage": "1. Acquisition",
+        "detail": "LabChart export; bipolar derivation. A 50 Hz acquisition "
+                  "low-pass rolls off before the analysis ceiling.",
+        "values": {},
+        "retained": False,
+    })
+    if is_power:
+        stages.append({
+            "stage": "2. High-pass filter",
+            "detail": f"{HP_HZ} Hz FIR high-pass on the continuous {chan} signal "
+                      "(drift/DC removal). Filtered continuous signal not retained.",
+            "values": {"hp_hz": HP_HZ},
+            "retained": False,
+        })
+        stages.append({
+            "stage": "3. Epoching",
+            "detail": f"Epoch each trial: 0–{int(WIN_S*1000)} ms analysis window "
+                      f"+ reach/buffer, with ±{int(PAD_S*1000)} ms wavelet padding. "
+                      "Epoch time series not retained.",
+            "values": {"window_ms": int(WIN_S * 1000), "pad_ms": int(PAD_S * 1000)},
+            "retained": False,
+        })
+        stages.append({
+            "stage": "4. Artifact rejection",
+            "detail": ("Adaptive per-recording thresholds. Theta (Fz-Pz) excludes "
+                       "blinks (1–7 Hz slow-band p-t-p > median + K·MAD) and "
+                       "coincident spikes." if band == "theta" else
+                       "Adaptive per-recording thresholds. Beta (C3-C4) excludes "
+                       "EMG (beta power > median + K·1.4826·MAD), bursts and "
+                       "coincident spikes.") +
+                      f" Per-trial flag: {excl_flag}. Included trials keep {excl_flag} == false.",
+            "values": {
+                "blink_k": BLINK_K, "blink_slow_hz": BLINK_SLOW_HZ,
+            } if band == "theta" else {
+                "emg_k": EMG_K, "burst_z": BURST_Z, "burst_impact": BURST_IMPACT,
+            },
+            "retained": True,
+        })
+        stages.append({
+            "stage": "5. Wavelet decomposition",
+            "detail": f"Complex Morlet CWT ({int(cyc)} cycles) over "
+                      f"{TOTAL_BAND[0]}–{TOTAL_BAND[1]} Hz at {FREQ_STEP} Hz steps, "
+                      "power averaged over the analysis window per frequency. "
+                      "Full time–frequency matrix not retained; per-trial per-"
+                      "frequency spectrum is retained.",
+            "values": {
+                "freq_range_hz": list(TOTAL_BAND),
+                "freq_step_hz": FREQ_STEP,
+                "morlet_cycles": cyc,
+            },
+            "retained": True,
+        })
+        stages.append({
+            "stage": "6. Relative power (per trial)",
+            "detail": f"{band}_rel = Σ power in {num_band[0]}–{num_band[1]} Hz ÷ "
+                      f"Σ power in {TOTAL_BAND[0]}–{TOTAL_BAND[1]} Hz (per trial). "
+                      "The denominator is recomputed from the retained spectrum; "
+                      "only the ratio is stored.",
+            "values": {
+                "numerator_band_hz": num_band,
+                "denominator_band_hz": list(TOTAL_BAND),
+            },
+            "retained": True,
+        })
+    else:
+        stages.append({
+            "stage": "2. Reaction time (per trial)",
+            "detail": "rt_ms = (keypress time − stimulus onset) × 1000, from the "
+                      "LabChart marker timeline. Included when rt_ms > 0.",
+            "values": {},
+            "retained": True,
+        })
+
+    stages.append({
+        "stage": f"{'7' if is_power else '3'}. Assign refresh rate",
+        "detail": "Each trial's block number is mapped to its refresh-rate label "
+                  "via the demographics 'Refresh Rate Condition Ordering' "
+                  "(not block number), so counterbalancing is respected.",
+        "values": {},
+        "retained": True,
+    })
+    stages.append({
+        "stage": f"{'8' if is_power else '4'}. Average per condition",
+        "detail": f"Mean of the included trial values within each refresh "
+                  f"condition ({low} and {high}) for this participant.",
+        "values": {},
+        "retained": True,
+    })
+    stages.append({
+        "stage": f"{'9' if is_power else '5'}. Difference",
+        "detail": f"Δ = {high} mean − {low} mean (per participant), then "
+                  "summarised across the sample (mean, median, SD, 95% CI).",
+        "values": {},
+        "retained": True,
+    })
+    return {"stages": stages}
 
 
 # ============================================================
@@ -904,6 +1228,31 @@ async def compare_subjects():
     }
 
 
+@app.get("/api/refresh-comparison")
+async def refresh_comparison():
+    """60 Hz vs 165 Hz comparison for theta rel, beta rel and reaction time.
+
+    Per participant: the mean value in each refresh condition and the
+    (higher − lower) refresh-rate difference. Across the sample: the mean,
+    median, SD, SEM and 95% CI of those per-participant differences, with N.
+    Refresh rate is derived from demographics block_order (not block number).
+    Each measure also carries a provenance chain describing the processing
+    stages and the retained config values used to produce the plotted number.
+    """
+    if len(_results) < 1:
+        raise HTTPException(400, "No subjects loaded. Upload files first.")
+
+    measures = [_refresh_measure_payload(k) for k in _REFRESH_MEASURES]
+    # A subject is fully usable here only if its demographics carry a block
+    # order; surface how many do so the UI can warn.
+    n_with_order = sum(1 for r in _results.values() if _block_hz_map(r.filename))
+    return {
+        "measures": measures,
+        "n_subjects": len(_results),
+        "n_with_refresh_order": n_with_order,
+    }
+
+
 # ============================================================
 #  CSV downloads
 # ============================================================
@@ -1118,6 +1467,39 @@ async def download_summary_csv_all():
     header = SUMMARY_HEADER + [h for h, _ in demo_cols]
     rows = [_summary_row(r, demo_cols) for r in _results.values()]
     return _csv_response(rows, header, "eeg_group_summary.csv")
+
+
+@app.get("/api/download-csv-refresh")
+async def download_refresh_csv():
+    """60 Hz vs 165 Hz comparison as CSV: one row per participant × measure,
+    plus a group-summary row per measure."""
+    if not _results:
+        raise HTTPException(404, "No results.")
+    header = [
+        "measure", "channel", "unit", "result_id", "filename",
+        "rate_low", "rate_low_mean", "rate_low_n",
+        "rate_high", "rate_high_mean", "rate_high_n",
+        "diff_high_minus_low", "note",
+    ]
+    rows = []
+    for m in (_refresh_measure_payload(k) for k in _REFRESH_MEASURES):
+        for p in m["participants"]:
+            lo = p["conditions"].get(m["rate_low"]) if m["rate_low"] else None
+            hi = p["conditions"].get(m["rate_high"]) if m["rate_high"] else None
+            rows.append([
+                m["label"], m["channel"], m["unit"], p["result_id"], p["filename"],
+                m["rate_low"] or "", lo["mean"] if lo else "", lo["n"] if lo else "",
+                m["rate_high"] or "", hi["mean"] if hi else "", hi["n"] if hi else "",
+                p["diff"] if p["diff"] is not None else "", p["note"] or "",
+            ])
+        g = m["group"]
+        rows.append([
+            f"{m['label']} — GROUP SUMMARY", m["channel"], m["unit"], "", "",
+            f"mean_diff={g['mean_diff']}", f"median_diff={g['median_diff']}", f"n={g['n']}",
+            f"sd={g['sd_diff']}", f"ci95_lo={g['ci95_lo']}", f"ci95_hi={g['ci95_hi']}",
+            g["mean_diff"] if g["mean_diff"] is not None else "", "",
+        ])
+    return _csv_response(rows, header, "eeg_refresh_60_vs_165.csv")
 
 
 # ============================================================

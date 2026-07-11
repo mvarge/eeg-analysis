@@ -307,6 +307,7 @@
                     Add Another Subject
                 </button>
                 <button id="btn-compare" class="btn-secondary" disabled>Compare Subjects</button>
+                <button id="btn-refresh-view" class="btn-secondary">60 vs 165 Hz</button>
                 <button id="btn-new" class="btn-secondary">Start Over</button>
             </div>
 
@@ -320,7 +321,10 @@
         <section id="compare-section" class="section" hidden>
             <div class="section-header">
                 <h2>Group Comparison</h2>
-                <button id="btn-back-individual" class="btn-secondary btn-sm">← Back to Individual</button>
+                <div class="section-header-actions">
+                    <button id="btn-refresh-from-compare" class="btn-secondary btn-sm">60 vs 165 Hz →</button>
+                    <button id="btn-back-individual" class="btn-secondary btn-sm">← Back to Individual</button>
+                </div>
             </div>
 
             <div class="compare-table-wrap">
@@ -367,7 +371,48 @@
                 <button id="btn-add-more" class="btn-secondary">Add More Subjects</button>
             </div>
         </section>
+
+        <!-- Refresh-Rate Comparison Section (60 Hz vs 165 Hz) -->
+        <section id="refresh-section" class="section" hidden>
+            <div class="section-header">
+                <h2>Refresh Rate — 60 Hz vs 165 Hz</h2>
+                <div class="section-header-actions">
+                    <button id="btn-refresh-back" class="btn-secondary btn-sm">← Back</button>
+                </div>
+            </div>
+            <p class="refresh-intro">
+                For each measure: every participant's mean in the 60 Hz and 165 Hz
+                conditions, and the difference (<strong>165 Hz − 60 Hz</strong>).
+                The headline is the group summary of those differences. Conditions
+                are assigned from each participant's refresh-rate ordering, not
+                block number. Click any chart to see how a number was computed.
+            </p>
+            <div id="refresh-warning" class="refresh-warning" hidden></div>
+            <div id="refresh-measures" class="refresh-measures"></div>
+
+            <div class="actions-bar">
+                <button id="btn-refresh-download" class="btn-primary">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <path d="M9 3v9M9 12L5 8M9 12l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    Download 60-vs-165 CSV
+                </button>
+                <button id="btn-refresh-add-more" class="btn-secondary">Add More Subjects</button>
+            </div>
+        </section>
     </main>
+
+    <!-- Provenance modal: computation trace for a clicked measure -->
+    <div id="provenance-modal" class="modal-overlay" hidden>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="prov-title">
+            <div class="modal-head">
+                <h3 id="prov-title">Computation trace</h3>
+                <button id="prov-close" class="modal-close" aria-label="Close">×</button>
+            </div>
+            <div id="prov-body" class="modal-body"></div>
+        </div>
+    </div>
 
     <footer>
         <p>EEG Flanker Analysis Tool · Data processed locally — nothing leaves your machine</p>
