@@ -1854,3 +1854,76 @@ footer p {
     line-height: 1.6;
 }
 .prov-headline strong { color: var(--accent, #5eead4); }
+
+/* ── Epoch viewer (Issues & Changes 1) ── */
+.epoch-row { cursor: pointer; transition: background 0.12s; }
+.epoch-row:hover { background: rgba(94, 234, 212, 0.07); }
+.epoch-row:focus-visible { outline: 2px solid var(--accent, #5eead4); outline-offset: -2px; }
+.modal-card-wide { max-width: 900px; }
+.epoch-loading, .epoch-error { color: var(--text-dim); font-size: 0.85rem; padding: 1rem 0; }
+.epoch-error { color: #fca5a5; }
+.ep-identity { margin-bottom: 1.1rem; }
+.ep-id-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 0.35rem 0.9rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.7rem;
+}
+.ep-id-k { color: var(--text-dim); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.ep-id-v { font-family: var(--font-mono); color: var(--text); margin-right: 0.6rem; }
+.ep-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
+.ep-chip {
+    font-size: 0.7rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    font-weight: 600;
+}
+.ep-keep { background: rgba(22, 163, 74, 0.15); color: #86efac; border: 1px solid rgba(22, 163, 74, 0.35); }
+.ep-excl { background: rgba(220, 38, 38, 0.15); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.35); }
+.ep-soft { background: rgba(234, 179, 8, 0.15); color: #fde047; border: 1px solid rgba(234, 179, 8, 0.4); }
+.ep-reason { font-size: 0.78rem; color: var(--text-dim); }
+.ep-reason strong { color: #fca5a5; }
+.ep-soft-note {
+    margin-top: 0.5rem;
+    padding: 0.55rem 0.7rem;
+    background: rgba(234, 179, 8, 0.08);
+    border: 1px solid rgba(234, 179, 8, 0.3);
+    border-radius: var(--radius);
+    font-size: 0.76rem;
+    color: #fde047;
+    line-height: 1.5;
+}
+.ep-panel { margin: 1.2rem 0; }
+.ep-panel h4 {
+    font-size: 0.85rem;
+    color: var(--text);
+    margin-bottom: 0.35rem;
+    font-family: var(--font-display);
+}
+.ep-note { font-size: 0.72rem; color: var(--text-dim); line-height: 1.5; margin-bottom: 0.6rem; }
+.ep-plot { width: 100%; }
+.ep-thresholds {
+    margin: 1.1rem 0;
+    padding: 0.7rem 0.9rem;
+    background: var(--bg-inset, rgba(255,255,255,0.02));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+.ep-thresholds h4 { font-size: 0.8rem; margin-bottom: 0.45rem; color: var(--text); }
+.ep-thresholds ul { list-style: none; padding: 0; margin: 0; }
+.ep-thresholds li { font-size: 0.75rem; color: var(--text-dim); line-height: 1.7; }
+.ep-thresholds strong { color: var(--text); font-family: var(--font-mono); }
+.ep-dev-table { width: 100%; border-collapse: collapse; font-size: 0.76rem; }
+.ep-dev-table th, .ep-dev-table td {
+    text-align: left;
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+}
+.ep-dev-table th { color: var(--text-dim); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.ep-dev-table .ep-num { font-family: var(--font-mono); text-align: right; }
+.ep-dev-table tr.ep-dev-hot { background: rgba(234, 179, 8, 0.1); }
+.ep-dev-table tr.ep-dev-hot td { color: #fde047; }
+.ep-mini-keep { color: #86efac; font-size: 0.7rem; }
+.ep-mini-excl { color: #fca5a5; font-size: 0.7rem; }
+.ep-scal-btn { margin-top: 0.4rem; }

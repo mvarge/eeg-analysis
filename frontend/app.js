@@ -1345,7 +1345,7 @@ function populateIncludedTable(trials, blockOrder = {}) {
         const hz = blockOrder[String(t.block)];
         const blockLabel = hz ? `${t.block} · ${escapeHtml(hz)}` : `${t.block}`;
         return `
-        <tr>
+        <tr class="epoch-row" data-trial="${t.trial}" role="button" tabindex="0" title="Click to inspect this epoch">
             ${trialNumCells(t)}
             <td>${blockLabel}</td>
             <td title="Raw seconds from LabChart file: ${onsetRaw}"><span class="onset-mm">${onsetLabel}</span><span class="onset-raw">${onsetRaw}s</span></td>
@@ -1359,6 +1359,7 @@ function populateIncludedTable(trials, blockOrder = {}) {
             <td>${t.coinc.toFixed(2)}</td>
         </tr>`;
     }).join('');
+    wireEpochRows(tbody);
 }
 
 // ── Excluded trials table ──
@@ -1381,7 +1382,7 @@ function populateExcludedTable(trials) {
         const onsetLabel = `${mm}:${ss}`;
         const onsetRaw = t.onset.toFixed(4);
         return `
-        <tr>
+        <tr class="epoch-row" data-trial="${t.trial}" role="button" tabindex="0" title="Click to inspect this epoch">
             ${trialNumCells(t)}
             <td>${t.block}</td>
             <td title="Raw seconds from LabChart file: ${onsetRaw}"><span class="onset-mm">${onsetLabel}</span><span class="onset-raw">${onsetRaw}s</span></td>
@@ -1396,6 +1397,235 @@ function populateExcludedTable(trials) {
             <td>${t.reason}</td>
         </tr>`;
     }).join('');
+    wireEpochRows(tbody);
+}
+
+// ── Epoch viewer (Issues & Changes 1) ──
+// Clicking any trial row (included or excluded) opens a per-epoch review modal.
+// The pipeline discards epoch waveforms, so the backend reconstructs the trace
+// on demand from the retained continuous signal (identical high-pass + epoching
+// to the analysis). The reviewer's core job: catch contaminated trials that were
+// KEPT — the modal shows the trace, the trial value vs its adaptive threshold,
+// power values, and robust deviation from the accepted-trial median.
+function wireEpochRows(tbody) {
+    tbody.querySelectorAll('tr.epoch-row').forEach(row => {
+        const trial = parseInt(row.dataset.trial, 10);
+        if (!Number.isFinite(trial)) return;
+        row.addEventListener('click', () => openEpochViewer(trial));
+        row.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openEpochViewer(trial); }
+        });
+    });
+}
+
+let _epochScalogramLoaded = false;
+
+async function openEpochViewer(trial, opts = {}) {
+    if (!currentResultId) return;
+    const modal = document.getElementById('epoch-modal');
+    const body = document.getElementById('epoch-body');
+    const title = document.getElementById('epoch-title');
+    if (!modal || !body) return;
+
+    const wantScal = !!opts.scalogram;
+    modal.hidden = false;
+    if (!opts.scalogram) {
+        _epochScalogramLoaded = false;
+        title.textContent = `Epoch ${trial}`;
+        body.innerHTML = `<p class="epoch-loading">Reconstructing epoch ${trial}…</p>`;
+    }
+
+    let data;
+    try {
+        const url = `${API}/api/subjects/${encodeURIComponent(currentResultId)}/epoch/${trial}` +
+            (wantScal ? '?scalogram=true' : '');
+        const resp = await fetch(url);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+        data = await resp.json();
+    } catch (e) {
+        body.innerHTML = `<p class="epoch-error">Could not load epoch ${trial}: ${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    _epochCurrent = { trial, data };
+    renderEpochViewer(data, wantScal);
+}
+
+let _epochCurrent = null;
+
+function renderEpochViewer(data, hasScalogram) {
+    const t = data.trial;
+    const ep = data.epoch;
+    const dv = data.deviation;
+    const th = data.thresholds;
+    const title = document.getElementById('epoch-title');
+    const body = document.getElementById('epoch-body');
+
+    const taskLabel = t.task_number != null
+        ? `Task #${t.task_number}` : `EEG #${t.trial} (no flanker match)`;
+    title.textContent = `Epoch — ${taskLabel} · EEG #${t.trial}`;
+
+    // Channel status chips.
+    const fzChip = t.fz_exclude
+        ? '<span class="ep-chip ep-excl">Fz–Pz excluded</span>'
+        : '<span class="ep-chip ep-keep">Fz–Pz kept</span>';
+    const c3Chip = t.c3_exclude
+        ? '<span class="ep-chip ep-excl">C3–C4 excluded</span>'
+        : '<span class="ep-chip ep-keep">C3–C4 kept</span>';
+    const softChip = dv.soft_flag
+        ? `<span class="ep-chip ep-soft" title="${escapeHtml(dv.soft_reasons.join('; '))}">⚠ borderline (kept)</span>`
+        : '';
+
+    // Identity block (item 1).
+    const identity = `
+        <div class="ep-identity">
+            <div class="ep-id-row">
+                <span class="ep-id-k">Task #</span><span class="ep-id-v">${t.task_number != null ? t.task_number : '—'}</span>
+                <span class="ep-id-k">EEG #</span><span class="ep-id-v">${t.trial}</span>
+                <span class="ep-id-k">Block</span><span class="ep-id-v">${t.block}</span>
+                <span class="ep-id-k">Condition</span><span class="ep-id-v">${escapeHtml(t.condition)}</span>
+                <span class="ep-id-k">Onset</span><span class="ep-id-v">${t.onset.toFixed(3)} s</span>
+                <span class="ep-id-k">RT</span><span class="ep-id-v">${t.rt_ms} ms</span>
+            </div>
+            <div class="ep-chips">${fzChip}${c3Chip}${softChip}</div>
+            ${t.reason ? `<div class="ep-reason">Exclusion reason: <strong>${escapeHtml(t.reason)}</strong></div>` : ''}
+            ${dv.soft_flag ? `<div class="ep-soft-note">⚠ This trial was <strong>kept</strong> but sits far from the accepted-trial distribution: ${escapeHtml(dv.soft_reasons.join('; '))}. Worth a manual look.</div>` : ''}
+        </div>`;
+
+    // Deviation table (item 5) + power values (item 4) share the metric rows.
+    const metricRows = Object.entries(dv.metrics).map(([key, m]) => {
+        const rz = m.robust_z == null ? '—' : `${m.robust_z > 0 ? '+' : ''}${m.robust_z.toFixed(2)}`;
+        const rzClass = (m.robust_z != null && Math.abs(m.robust_z) >= dv.soft_flag_z && m.channel_kept)
+            ? 'ep-dev-hot' : '';
+        const medTxt = m.median == null ? '—' : fmtNum(m.median, 3);
+        return `<tr class="${rzClass}">
+            <td>${escapeHtml(m.label)}</td>
+            <td class="ep-num">${fmtNum(m.value, 3)}</td>
+            <td class="ep-num">${medTxt}</td>
+            <td class="ep-num">${rz}</td>
+            <td>${m.channel_kept ? '<span class="ep-mini-keep">accepted</span>' : '<span class="ep-mini-excl">excluded</span>'}</td>
+        </tr>`;
+    }).join('');
+
+    const thresholdsBlk = `
+        <div class="ep-thresholds">
+            <h4>Adaptive thresholds (this recording)</h4>
+            <ul>
+                <li>Blink (Fz slow-band p-t-p): <strong>${th.blink_uv} µV</strong>
+                    — this trial: <strong>${t.fz_ptp.toFixed(1)} µV</strong> full-band p-t-p</li>
+                <li>EMG (C3 beta power): <strong>${th.emg} µV²</strong></li>
+                <li>Coincidence z (both channels): <strong>${th.coinc_z}</strong>
+                    — this trial coinc: <strong>${t.coinc.toFixed(2)}</strong></li>
+                <li>Burst z / impact: <strong>${th.burst_z}</strong> / <strong>${th.burst_impact}%</strong>
+                    — this trial: maxz <strong>${t.maxz.toFixed(2)}</strong>, impact <strong>${t.impact.toFixed(1)}%</strong></li>
+            </ul>
+        </div>`;
+
+    const devTable = `
+        <div class="ep-panel">
+            <h4>Power &amp; metrics vs accepted-trial distribution</h4>
+            <p class="ep-note">Robust z = (value − median)/(1.4826·MAD) over trials whose
+            channel was accepted. Denominator for relative power is 1–35 Hz. A channel
+            marked "excluded" is not part of that channel's reference set.</p>
+            <table class="ep-dev-table">
+                <thead><tr><th>Measure</th><th>This trial</th><th>Accepted median</th><th>Robust z</th><th>Channel</th></tr></thead>
+                <tbody>${metricRows}</tbody>
+            </table>
+        </div>`;
+
+    const scalBtn = hasScalogram
+        ? ''
+        : `<button id="ep-scal-btn" class="btn-secondary ep-scal-btn">Show scalogram (time × frequency)</button>`;
+
+    body.innerHTML = `
+        ${identity}
+        <div class="ep-panel">
+            <h4>Signal trace — 0 to ${Math.round(ep.win_ms + ep.reach_ms)} ms (analysis + wavelet buffer)</h4>
+            <p class="ep-note">The shaded buffer band (${ep.win_ms}–${Math.round(ep.win_ms + ep.reach_ms)} ms)
+            feeds the wavelet edges only. Onset = 0 ms; keypress marked where available.
+            The dashed slow-band (1–${th.blink_slow_hz} Hz) Fz trace is the blink detector's input.</p>
+            <div id="ep-trace" class="ep-plot"></div>
+        </div>
+        ${thresholdsBlk}
+        ${devTable}
+        <div id="ep-scal-wrap" class="ep-panel" ${hasScalogram ? '' : 'hidden'}>
+            <h4>Scalogram — |CWT|² (Fz–Pz theta cycles / C3–C4 beta cycles)</h4>
+            <div id="ep-scal-fz" class="ep-plot"></div>
+            <div id="ep-scal-c3" class="ep-plot"></div>
+        </div>
+        ${scalBtn}`;
+
+    drawEpochTrace(data);
+    if (hasScalogram && ep.scalogram) drawEpochScalogram(ep.scalogram, ep.times_ms);
+
+    const sb = document.getElementById('ep-scal-btn');
+    if (sb) sb.addEventListener('click', () => openEpochViewer(_epochCurrent.trial, { scalogram: true }));
+}
+
+function drawEpochTrace(data) {
+    const ep = data.epoch;
+    const t = data.trial;
+    const winEnd = ep.win_ms + ep.reach_ms;
+    // Only show 0..winEnd (+ a little pre-onset context) per the spec's "0–675 ms".
+    const traces = [
+        { x: ep.times_ms, y: ep.fz, name: 'Fz–Pz', type: 'scatter', mode: 'lines',
+          line: { color: '#2563eb', width: 1.4 } },
+        { x: ep.times_ms, y: ep.c3, name: 'C3–C4', type: 'scatter', mode: 'lines',
+          line: { color: '#16a34a', width: 1.4 } },
+        { x: ep.times_ms, y: ep.fz_slow, name: 'Fz slow (blink input)', type: 'scatter',
+          mode: 'lines', line: { color: '#2563eb', width: 1, dash: 'dot' }, opacity: 0.6 },
+    ];
+    const shapes = [{
+        type: 'rect', xref: 'x', yref: 'paper',
+        x0: ep.win_ms, x1: winEnd, y0: 0, y1: 1,
+        fillcolor: 'rgba(234,179,8,0.10)', line: { width: 0 }, layer: 'below',
+    }];
+    const annotations = [];
+    // Onset marker at 0 ms.
+    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: 0, x1: 0, y0: 0, y1: 1,
+        line: { color: '#111', width: 1.2, dash: 'solid' } });
+    annotations.push({ x: 0, y: 1.02, xref: 'x', yref: 'paper', text: 'onset',
+        showarrow: false, font: { size: 10, color: '#111' } });
+    if (data.keypress_ms != null) {
+        shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0: data.keypress_ms,
+            x1: data.keypress_ms, y0: 0, y1: 1, line: { color: '#dc2626', width: 1.2, dash: 'dash' } });
+        annotations.push({ x: data.keypress_ms, y: 1.02, xref: 'x', yref: 'paper',
+            text: 'keypress', showarrow: false, font: { size: 10, color: '#dc2626' } });
+    }
+    const layout = {
+        margin: { l: 50, r: 12, t: 20, b: 40 }, height: 300,
+        xaxis: { title: 'Time from onset (ms)', range: [-60, winEnd + 20], zeroline: false },
+        yaxis: { title: 'µV' },
+        shapes, annotations,
+        legend: { orientation: 'h', y: -0.25 },
+        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    };
+    Plotly.react('ep-trace', traces, layout, { displayModeBar: false, responsive: true });
+}
+
+function drawEpochScalogram(scal, timesMs) {
+    const common = {
+        margin: { l: 50, r: 12, t: 24, b: 36 }, height: 240,
+        xaxis: { title: 'Time from onset (ms)' }, yaxis: { title: 'Hz' },
+    };
+    Plotly.react('ep-scal-fz',
+        [{ z: scal.fz_power, x: timesMs, y: scal.freqs, type: 'heatmap', colorscale: 'Viridis',
+           colorbar: { title: 'µV²', thickness: 10 } }],
+        { ...common, title: { text: 'Fz–Pz', font: { size: 12 } } },
+        { displayModeBar: false, responsive: true });
+    Plotly.react('ep-scal-c3',
+        [{ z: scal.c3_power, x: timesMs, y: scal.freqs, type: 'heatmap', colorscale: 'Viridis',
+           colorbar: { title: 'µV²', thickness: 10 } }],
+        { ...common, title: { text: 'C3–C4', font: { size: 12 } } },
+        { displayModeBar: false, responsive: true });
+}
+
+function closeEpochViewer() {
+    const modal = document.getElementById('epoch-modal');
+    if (modal) modal.hidden = true;
+    _epochCurrent = null;
 }
 
 // ── Missing trials table ──
@@ -2175,6 +2405,15 @@ function initActions() {
     });
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeProvenance();
+    });
+
+    // Epoch viewer modal close (button, overlay click, Escape)
+    document.getElementById('epoch-close').addEventListener('click', closeEpochViewer);
+    document.getElementById('epoch-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'epoch-modal') closeEpochViewer();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeEpochViewer();
     });
 
     document.getElementById('btn-download-all').addEventListener('click', () => {

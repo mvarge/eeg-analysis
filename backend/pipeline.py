@@ -628,3 +628,99 @@ def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude
         rel_median_inc=_median("first", rel_attr),
         by_block=by_block,
     )
+
+
+# ============================================================
+#  Epoch reconstruction (for the per-epoch review viewer)
+# ============================================================
+# The pipeline discards per-trial time-series after computing metrics. For the
+# epoch viewer we reconstruct a single trial's waveform on demand from the
+# retained continuous signal (server keeps the ParsedEEG in memory), using the
+# EXACT same high-pass + epoching MNE performs in run_pipeline, so the displayed
+# trace is the signal that was actually analysed (verified: fz_ptp reproduces to
+# 0.0 µV difference). Nothing is precomputed or stored.
+
+def _highpassed_continuous(parsed: ParsedEEG):
+    """Return (raw_hp, fs): the 1 Hz high-passed continuous MNE Raw, matching
+    Stage 3 of run_pipeline (NaN-zeroed before filtering)."""
+    fs = parsed.sampling_rate
+    raw_data = np.stack([parsed.fz, parsed.c3]) * 1e-6           # V
+    raw_data = np.where(~np.isfinite(raw_data), 0.0, raw_data)   # NaN-safe (S002)
+    info = mne.create_info(["Fz-Pz", "C3-C4"], fs, "eeg")
+    raw = mne.io.RawArray(raw_data, info, verbose=False)
+    raw_hp = raw.copy().filter(l_freq=HP_HZ, h_freq=None, verbose=False)
+    return raw_hp, fs
+
+
+def reconstruct_epoch(
+    parsed: ParsedEEG,
+    onset_sample_concat: int,
+    cond: str,
+    want_scalogram: bool = False,
+) -> dict:
+    """Reconstruct one trial's epoch for display.
+
+    Returns a dict with:
+      * ``times_ms``     — epoch time axis in ms from stimulus onset (incl. the
+                           ±PAD_S padding, so −300 .. +800 ms).
+      * ``fz`` / ``c3``  — high-passed epoch traces (µV), same length as times_ms.
+      * ``fs``           — sampling rate (Hz).
+      * ``win_ms`` / ``reach_ms`` / ``pad_ms`` — window/buffer/pad boundaries (ms)
+                           so the frontend can shade the analysis vs buffer bands.
+      * ``fz_slow``      — the 1–7 Hz slow-band Fz trace over the epoch (the exact
+                           signal the adaptive blink detector thresholds), so the
+                           viewer can point at the feature that triggered a blink
+                           exclusion.
+      * ``scalogram``    — optional {freqs, fz_power, c3_power} time×frequency
+                           |CWT|² over the epoch when ``want_scalogram``.
+    """
+    raw_hp, fs = _highpassed_continuous(parsed)
+    code = 1 if cond == "con" else 2
+    label = "con" if cond == "con" else "first"
+    events = np.array([[int(onset_sample_concat), 0, code]], dtype=int)
+    epochs = mne.Epochs(
+        raw_hp, events, {label: code},
+        tmin=-PAD_S, tmax=WIN_S + PAD_S,
+        baseline=None, preload=True, verbose=False,
+    )
+    if len(epochs) == 0:
+        raise ValueError("epoch could not be extracted at that onset sample")
+    d = epochs.get_data(copy=True)[0] * 1e6   # (2, n_samp) µV
+    fz = d[0]
+    c3 = d[1]
+    times_ms = (epochs.times * 1000.0)
+
+    # Slow-band (1–7 Hz) Fz over the same epoch — the blink-detector's input.
+    raw_slow = raw_hp.copy().filter(l_freq=None, h_freq=BLINK_SLOW_HZ, verbose=False)
+    slow_ep = mne.Epochs(
+        raw_slow, events, {label: code},
+        tmin=-PAD_S, tmax=WIN_S + PAD_S,
+        baseline=None, preload=True, verbose=False,
+    )
+    fz_slow = slow_ep.get_data(copy=True)[0][0] * 1e6
+
+    out = {
+        "times_ms": times_ms.tolist(),
+        "fz": fz.tolist(),
+        "c3": c3.tolist(),
+        "fz_slow": fz_slow.tolist(),
+        "fs": float(fs),
+        "win_ms": WIN_S * 1000.0,
+        "reach_ms": REACH_S * 1000.0,
+        "pad_ms": PAD_S * 1000.0,
+    }
+
+    if want_scalogram:
+        FREQS = np.arange(TOTAL_BAND[0], TOTAL_BAND[1] + 1e-6, FREQ_STEP)
+        # theta-cycle CWT for Fz, beta-cycle CWT for C3 (matches the pipeline's
+        # per-channel wavelet choice).
+        fz_pow = _cwt_power(fz, fs, THETA_CYC, FREQS)
+        c3_pow = _cwt_power(c3, fs, BETA_CYC, FREQS)
+        out["scalogram"] = {
+            "freqs": FREQS.tolist(),
+            "fz_power": [row.tolist() for row in fz_pow],
+            "c3_power": [row.tolist() for row in c3_pow],
+            "theta_band": list(THETA_BAND),
+            "beta_band": list(BETA_BAND),
+        }
+    return out

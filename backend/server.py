@@ -37,9 +37,9 @@ from subject_id import parse_filename as parse_upload_filename
 from pipeline import (
     PipelineResult, TrialResult, ChannelSummary,
     BLINK_UV, BLINK_SLOW_HZ, BLINK_K, EMG_BETA, EMG_K, BURST_Z, BURST_IMPACT, COINC_Z,
-    HP_HZ, WIN_S, PAD_S, THETA_BAND, BETA_BAND, TOTAL_BAND, FREQ_STEP,
+    HP_HZ, WIN_S, PAD_S, REACH_S, THETA_BAND, BETA_BAND, TOTAL_BAND, FREQ_STEP,
     THETA_CYC, BETA_CYC,
-    run_pipeline,
+    run_pipeline, reconstruct_epoch,
 )
 from demographics import (
     Demographic, DISPLAY_FIELDS,
@@ -956,6 +956,134 @@ async def subject_results(result_id: str):
         "alignment": [_alignment_payload(a) for a in alignment],
         "accuracy": _accuracy_payload(result_id),
         "checks": _checks_payload_for(result_id),
+    }
+
+
+def _mad_deviation(values: List[float], x: float) -> dict:
+    """Robust deviation of x from the reference distribution `values`.
+
+    Returns median, MAD (scaled to a σ estimate, 1.4826·MAD), and the robust
+    z-score (x−median)/σ. Falls back to NaN-safe zeros when the reference set is
+    empty or degenerate (MAD 0)."""
+    arr = np.asarray([v for v in values if v is not None and np.isfinite(v)], float)
+    if arr.size == 0:
+        return {"median": None, "mad": None, "sigma": None, "robust_z": None, "n": 0}
+    med = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - med)))
+    sigma = 1.4826 * mad
+    rz = float((x - med) / sigma) if sigma > 0 else None
+    return {"median": med, "mad": mad, "sigma": sigma, "robust_z": rz, "n": int(arr.size)}
+
+
+# Metrics reviewed per epoch, and which channel's accepted-trial set is the
+# reference distribution for the deviation readout (item 5 of the spec).
+_EPOCH_METRICS = [
+    # (payload key, TrialResult attr, reference channel, human label)
+    ("fz_ptp",    "fz_ptp",    "fz", "Fz–Pz peak-to-peak (µV)"),
+    ("theta_rel", "theta_rel", "fz", "Fz–Pz theta relative power"),
+    ("theta_abs", "theta_abs", "fz", "Fz–Pz theta absolute power (µV²)"),
+    ("maxz",      "maxz",      "c3", "C3–C4 max |z|"),
+    ("beta_rel",  "beta_rel",  "c3", "C3–C4 beta relative power"),
+    ("beta_abs",  "beta_abs",  "c3", "C3–C4 beta absolute power (µV²)"),
+]
+
+# Soft-flag threshold: a KEPT trial whose robust z exceeds this on any of its
+# accepted channels' metrics is "close to the edge" and worth a manual look
+# (the reviewer's core use case: sub-threshold contamination that survived).
+_SOFT_FLAG_Z = 3.0
+
+
+def _epoch_deviation(result: PipelineResult, trial: TrialResult) -> dict:
+    """Per-metric robust deviation of one trial vs the accepted-trial reference
+    set, plus a soft-flag when a kept-but-borderline trial is detected."""
+    fz_accepted = [t for t in result.trials if not t.fz_exclude]
+    c3_accepted = [t for t in result.trials if not t.c3_exclude]
+    ref = {"fz": fz_accepted, "c3": c3_accepted}
+
+    metrics = {}
+    soft_flag = False
+    soft_reasons = []
+    for key, attr, chan, label in _EPOCH_METRICS:
+        vals = [getattr(t, attr) for t in ref[chan]]
+        x = getattr(trial, attr)
+        dev = _mad_deviation(vals, x)
+        dev["value"] = round(float(x), 4)
+        dev["label"] = label
+        dev["channel"] = "Fz-Pz" if chan == "fz" else "C3-C4"
+        # This trial's accepted status on the reference channel: only soft-flag
+        # metrics whose channel was KEPT (a contaminated-but-kept trial).
+        chan_kept = (not trial.fz_exclude) if chan == "fz" else (not trial.c3_exclude)
+        dev["channel_kept"] = chan_kept
+        if chan_kept and dev["robust_z"] is not None and abs(dev["robust_z"]) >= _SOFT_FLAG_Z:
+            soft_flag = True
+            soft_reasons.append(f"{label} is {dev['robust_z']:+.1f} MAD from the accepted median")
+        metrics[key] = dev
+
+    return {
+        "metrics": metrics,
+        "soft_flag": soft_flag,
+        "soft_reasons": soft_reasons,
+        "soft_flag_z": _SOFT_FLAG_Z,
+    }
+
+
+@app.get("/api/subjects/{result_id}/epoch/{trial}")
+async def subject_epoch(result_id: str, trial: int, scalogram: bool = False):
+    """Reconstruct one trial's epoch for the per-epoch review viewer.
+
+    The pipeline discards epoch time-series after computing metrics, so we
+    rebuild the waveform on demand from the retained continuous signal using the
+    exact same high-pass + epoching MNE performs (verified to reproduce fz_ptp to
+    0.0 µV). Returns identity + per-channel traces + onset/keypress marks +
+    adaptive thresholds + power values + robust deviation vs accepted trials.
+    ``scalogram=true`` additionally returns the time×frequency CWT (nice-to-have).
+    """
+    if result_id not in _results:
+        raise HTTPException(404, f"Subject '{result_id}' not found. Upload it first.")
+    parsed = _parsed.get(result_id)
+    if parsed is None:
+        raise HTTPException(409, "Continuous signal for this subject is no longer in memory.")
+
+    result = _results[result_id]
+    tr = next((t for t in result.trials if t.trial == trial), None)
+    if tr is None:
+        raise HTTPException(404, f"Trial {trial} not found for subject '{result_id}'.")
+
+    # Map the (post-merge, renumbered) trial back to its sample in the retained
+    # continuous signal. parsed.trials is the post-block-selection list and is
+    # 1:1 with result.trials by `trial` number (verified), carrying the concat
+    # sample index we need for slicing.
+    p_by_num = {t.trial: t for t in parsed.trials}
+    p_trial = p_by_num.get(tr.trial)
+    if p_trial is None:
+        raise HTTPException(409, f"No continuous-signal mapping for trial {trial}.")
+
+    try:
+        epoch = reconstruct_epoch(
+            parsed, p_trial.onset_sample_concat, tr.cond, want_scalogram=bool(scalogram)
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+    flanker_map, _ = _flanker_context(result_id)
+    keypress_ms = float(tr.rt_ms) if tr.rt_ms and tr.rt_ms > 0 else None
+
+    return {
+        "status": "success",
+        "result_id": result_id,
+        "trial": _trial_row(tr, flanker_map),
+        "epoch": epoch,
+        "onset_ms": 0.0,
+        "keypress_ms": keypress_ms,
+        "thresholds": {
+            "blink_uv": round(float(getattr(result, "blink_threshold_uv", 0.0)), 2),
+            "emg": round(float(getattr(result, "emg_threshold", 0.0)), 2),
+            "coinc_z": COINC_Z,
+            "burst_z": BURST_Z,
+            "burst_impact": BURST_IMPACT,
+            "blink_slow_hz": BLINK_SLOW_HZ,
+        },
+        "deviation": _epoch_deviation(result, tr),
     }
 
 
