@@ -440,6 +440,35 @@ async def list_subjects():
     }
 
 
+@app.get("/api/subjects/{result_id}/results")
+async def subject_results(result_id: str):
+    """Full results payload for one already-uploaded subject.
+
+    Mirrors the shape returned by /api/upload so the frontend can re-display
+    an individual subject (e.g. when drilling into one from the group view)
+    without re-uploading. 404 if the subject is not in memory.
+    """
+    if result_id not in _results:
+        raise HTTPException(404, f"Subject '{result_id}' not found. Upload it first.")
+
+    result = _results[result_id]
+    parsed = _parsed.get(result_id)
+    alignment = _alignment.get(result_id, [])
+
+    return {
+        "status": "success",
+        "result_id": result_id,
+        "summary": _summary_payload(result),
+        "trials": [_trial_row(t) for t in result.trials],
+        "spectra": _spectra_payload(result),
+        "source_files": list(getattr(parsed, "source_files", [])) if parsed else [],
+        "warnings": list(getattr(parsed, "warnings", [])) if parsed else [],
+        "alignment": [_alignment_payload(a) for a in alignment],
+        "accuracy": _accuracy_payload(result_id),
+        "checks": _checks_payload_for(result_id),
+    }
+
+
 @app.delete("/api/subjects/{result_id}")
 async def remove_subject(result_id: str):
     """Drop one subject from memory."""

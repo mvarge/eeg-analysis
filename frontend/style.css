@@ -1165,6 +1165,18 @@ footer p {
     font-size: 0.75rem;
     color: var(--text);
     animation: fadeUp 0.3s ease both;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.subject-chip:hover {
+    border-color: var(--accent, var(--incongruent));
+    background: var(--bg-hover, var(--bg-card));
+}
+
+.subject-chip.active {
+    border-color: var(--accent, var(--incongruent));
+    box-shadow: inset 0 0 0 1px var(--accent, var(--incongruent));
 }
 
 .subject-chip .chip-dot {
@@ -1244,6 +1256,13 @@ footer p {
 
 .compare-table .val-con { color: var(--congruent); }
 .compare-table .val-inc { color: var(--incongruent); }
+
+.compare-table tr.compare-row { cursor: pointer; }
+.compare-table tr.compare-row:hover td { background: rgba(255,255,255,0.05); }
+.compare-table tr.compare-row:focus-visible {
+    outline: 2px solid var(--accent, var(--incongruent));
+    outline-offset: -2px;
+}
 
 /* Responsive */
 @media (max-width: 768px) {

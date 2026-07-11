@@ -1020,24 +1020,74 @@ function updateSubjectList() {
     const itemsEl = document.getElementById('subject-items');
     if (uploadedSubjects.length > 1) {
         listEl.hidden = false;
-        itemsEl.innerHTML = uploadedSubjects.map((s, i) => `
-            <span class="subject-chip">
+        itemsEl.innerHTML = uploadedSubjects.map((s, i) => {
+            const active = s.result_id === currentResultId ? ' active' : '';
+            return `
+            <span class="subject-chip${active}" data-id="${s.result_id}" role="button" tabindex="0"
+                  title="View ${escapeHtml(s.filename)}">
                 <span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]}"></span>
-                ${s.filename}
+                ${escapeHtml(s.filename)}
                 <button class="chip-remove" data-id="${s.result_id}" title="Remove">×</button>
-            </span>
-        `).join('');
+            </span>`;
+        }).join('');
+
+        // Click a chip → load that subject's individual results.
+        itemsEl.querySelectorAll('.subject-chip').forEach(chip => {
+            const load = () => {
+                const id = chip.dataset.id;
+                if (id && id !== currentResultId) loadSubject(id);
+            };
+            chip.addEventListener('click', (e) => {
+                if (e.target.closest('.chip-remove')) return;
+                load();
+            });
+            chip.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); load(); }
+            });
+        });
+
         itemsEl.querySelectorAll('.chip-remove').forEach(btn => {
             btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
                 const id = e.target.dataset.id;
                 await fetch(`${API}/api/subjects/${id}`, { method: 'DELETE' });
                 uploadedSubjects = uploadedSubjects.filter(s => s.result_id !== id);
+                // If we removed the subject currently on screen, fall back to
+                // the first remaining one (or the upload view if none left).
+                if (id === currentResultId) {
+                    if (uploadedSubjects.length) {
+                        loadSubject(uploadedSubjects[0].result_id);
+                    } else {
+                        currentResultId = null;
+                        currentData = null;
+                        goToUpload();
+                        return;
+                    }
+                }
                 updateSubjectList();
                 updateCompareButton();
             });
         });
     } else {
         listEl.hidden = true;
+    }
+}
+
+// Fetch one already-uploaded subject's full payload and show it individually.
+async function loadSubject(resultId) {
+    try {
+        const resp = await fetch(`${API}/api/subjects/${encodeURIComponent(resultId)}/results`);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            alert(err.detail || 'Could not load subject.');
+            return;
+        }
+        const data = await resp.json();
+        document.getElementById('compare-section').hidden = true;
+        document.getElementById('upload-section').hidden = true;
+        showResults(data);
+    } catch (err) {
+        alert('Error loading subject: ' + err.message);
     }
 }
 
@@ -1100,7 +1150,7 @@ async function showComparison() {
                     <td>${escapeHtml(blockOrder)}</td>
                 `;
             }
-            return `<tr>
+            return `<tr class="compare-row" data-id="${escapeHtml(subj.result_id)}" role="button" tabindex="0" title="View ${escapeHtml(s.filename)}">
                 <td><span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]};display:inline-block;width:8px;height:8px;border-radius:50%"></span></td>
                 <td>${escapeHtml(s.filename)}</td>
                 <td>${escapeHtml(s.recording_date)}</td>
@@ -1114,6 +1164,15 @@ async function showComparison() {
                 <td>${s.beta.surviving}/${s.n_trials}${balBe}</td>
             </tr>`;
         }).join('');
+
+        // Click a table row → drill into that subject's individual results.
+        tbody.querySelectorAll('.compare-row').forEach(row => {
+            const load = () => { if (row.dataset.id) loadSubject(row.dataset.id); };
+            row.addEventListener('click', load);
+            row.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); load(); }
+            });
+        });
 
         // Grouped bars: relative power
         renderGroupedBar('chart-compare-theta', subjects,
