@@ -1927,3 +1927,19 @@ footer p {
 .ep-mini-keep { color: #86efac; font-size: 0.7rem; }
 .ep-mini-excl { color: #fca5a5; font-size: 0.7rem; }
 .ep-scal-btn { margin-top: 0.4rem; }
+
+/* ── Missing-box reason badges (Doc 5 item 3) ── */
+.mr-badge {
+    display: inline-block;
+    font-size: 0.66rem;
+    font-weight: 600;
+    padding: 0.12rem 0.45rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+.mr-dropped { background: rgba(220, 38, 38, 0.15); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.35); }
+.mr-align   { background: rgba(234, 179, 8, 0.15); color: #fde047; border: 1px solid rgba(234, 179, 8, 0.4); }
+.mr-absent  { background: rgba(107, 114, 128, 0.18); color: #cbd5e1; border: 1px solid rgba(107, 114, 128, 0.4); }
+.mr-detail { font-size: 0.72rem; color: var(--text-dim); margin-left: 0.35rem; }

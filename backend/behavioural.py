@@ -83,9 +83,17 @@ class BehaviouralTrial:
         """Canonical 1-based flanker task number across both blocks (1-160).
 
         Derived from the OpenSesame per-block `live_row` (0-based, resets each
-        block) plus the block offset. Returns None when `live_row` is absent.
+        block) plus the block offset. Returns None when `live_row` is absent OR
+        when it falls outside the expected [0, TRIALS_PER_BLOCK) range or the
+        block is not 1/2 — rather than silently emitting a number > 160. A
+        restarted/aborted flanker run can push live_row past 79; such rows are
+        flagged by `validate_task_numbering` and get no canonical number here.
         """
         if self.live_row is None:
+            return None
+        if self.block not in (1, 2):
+            return None
+        if not (0 <= self.live_row < TRIALS_PER_BLOCK):
             return None
         return (self.block - 1) * TRIALS_PER_BLOCK + self.live_row + 1
 
@@ -273,12 +281,79 @@ def parse_behavioural_session(
     if n_b2 == 0:
         warnings.append("Behavioural session has no block-2 rows (stage=='second').")
 
+    # Validate that per-block row counts / live_row ranges support canonical
+    # 1-160 numbering. A restarted or aborted flanker run yields extra/short
+    # blocks or out-of-range live_row values that would otherwise misnumber or
+    # push Task # past 160 — flag these instead of computing silently.
+    warnings.extend(validate_task_numbering(all_trials))
+
     return BehaviouralSession(
         subject_nr=subject_nr,
         files=parsed,
         trials=all_trials,
         warnings=warnings,
     )
+
+
+def validate_task_numbering(trials: List["BehaviouralTrial"]) -> List[str]:
+    """Check that behavioural trials support canonical 1-160 numbering.
+
+    Returns a list of human-readable warnings (empty when everything is clean).
+    Flags, per block: row count != TRIALS_PER_BLOCK, live_row values outside
+    [0, TRIALS_PER_BLOCK), duplicate live_row values, and any resulting Task #
+    that would exceed the 160 ceiling. Does not raise — numbering degrades to a
+    None (amber-* fallback) for the offending rows via `task_number`.
+    """
+    warnings: List[str] = []
+    by_block: dict[int, List["BehaviouralTrial"]] = {}
+    for t in trials:
+        by_block.setdefault(t.block, []).append(t)
+
+    n_expected_max = 0
+    for blk in sorted(by_block):
+        block_trials = by_block[blk]
+        n = len(block_trials)
+        if blk in (1, 2):
+            n_expected_max = max(n_expected_max, blk)
+        if n != TRIALS_PER_BLOCK:
+            warnings.append(
+                f"Block {blk} has {n} behavioural rows (expected {TRIALS_PER_BLOCK}); "
+                "task numbering for this block may be unreliable — verify the "
+                "flanker file was not restarted/aborted."
+            )
+        live_rows = [t.live_row for t in block_trials if t.live_row is not None]
+        oor = [lr for lr in live_rows if not (0 <= lr < TRIALS_PER_BLOCK)]
+        if oor:
+            warnings.append(
+                f"Block {blk} has {len(oor)} row(s) with live_row outside "
+                f"0-{TRIALS_PER_BLOCK - 1} (e.g. {sorted(set(oor))[:5]}); these get no "
+                "canonical Task # (shown with the amber * fallback)."
+            )
+        dupes = sorted({lr for lr in live_rows if live_rows.count(lr) > 1})
+        if dupes:
+            warnings.append(
+                f"Block {blk} has duplicate live_row value(s) {dupes[:5]}; "
+                "restarted flanker run suspected — task numbers may collide."
+            )
+
+    # Extra blocks beyond 1/2 cannot be mapped into the 1-160 scheme.
+    extra_blocks = [b for b in by_block if b not in (1, 2)]
+    if extra_blocks:
+        warnings.append(
+            f"Behavioural session has unexpected block label(s) {sorted(extra_blocks)}; "
+            "only blocks 1 and 2 map to canonical Task # 1-160."
+        )
+
+    # Ceiling guard: no emitted task_number should exceed 2*TRIALS_PER_BLOCK.
+    ceiling = 2 * TRIALS_PER_BLOCK
+    over = [t.task_number for t in trials
+            if t.task_number is not None and t.task_number > ceiling]
+    if over:
+        warnings.append(
+            f"{len(over)} trial(s) computed a Task # above {ceiling}; capped to the "
+            "amber * fallback to avoid misnumbering."
+        )
+    return warnings
 
 
 # ── Alignment (§6) ─────────────────────────────────────────────────────────

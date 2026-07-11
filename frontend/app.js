@@ -724,6 +724,14 @@ function initBehaviouralUpload() {
                 const data = await resp.json();
                 uploaded++;
                 if (data.alignment && data.alignment.length) matched++;
+                // Surface task-numbering warnings (aborted/restarted flanker
+                // runs: block != 80 rows, out-of-range live_row) so misnumbering
+                // is never silent.
+                const numWarn = (data.warnings || []).filter(w =>
+                    /expected \d+|live_row|Task #|block label/i.test(w));
+                if (numWarn.length) {
+                    setBehaviouralStatus(`⚠ ${sid}: ${numWarn.join(' · ')}`, false);
+                }
                 // If this behavioural session is for the currently-displayed
                 // subject, refresh the alignment panel immediately.
                 if (currentResultId && data.subject_id === currentResultId) {
@@ -1659,9 +1667,27 @@ function populateMissingTable(missing) {
             <td>${escapeHtml(m.condition || '')}</td>
             <td>${rt}</td>
             <td class="${m.correct === false ? 'flag-yes' : 'flag-no'}">${correct}</td>
-            <td>${escapeHtml(m.reason || 'eeg data not found')}</td>
+            <td>${missingReasonBadge(m)}</td>
         </tr>`;
     }).join('');
+}
+
+// The Missing box separates three non-equivalent causes (Doc 5 item 3):
+//   dropped_epoch  — EEG existed but was dropped (NaN/artifact); belongs with Excluded.
+//   alignment_miss — EEG present but RT alignment failed; recoverable upstream.
+//   not_recorded   — genuine data loss.
+const _MISSING_REASON_META = {
+    dropped_epoch:  { cls: 'mr-dropped',  label: 'dropped epoch' },
+    alignment_miss: { cls: 'mr-align',    label: 'alignment miss' },
+    not_recorded:   { cls: 'mr-absent',   label: 'never recorded' },
+};
+
+function missingReasonBadge(m) {
+    const meta = _MISSING_REASON_META[m.reason_code];
+    const text = escapeHtml(m.reason || 'eeg data not found');
+    if (!meta) return text;
+    return `<span class="mr-badge ${meta.cls}" title="${text}">${meta.label}</span> `
+        + `<span class="mr-detail">${text}</span>`;
 }
 
 // ── Subject list ──

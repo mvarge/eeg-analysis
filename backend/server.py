@@ -236,6 +236,20 @@ def _flanker_context(subject_id: str) -> tuple[dict, List[dict]]:
     result = _results[subject_id]
     session = _behavioural[subject_id]
     alignment = _alignment.get(subject_id, [])
+    parsed = _parsed.get(subject_id)
+
+    # EEG epochs that were DETECTED but DROPPED by the pipeline (NaN/artifact in
+    # the analysed window). These never reach _results/alignment, so an unmatched
+    # behavioural row explained by one of these is a "dropped epoch" (case b),
+    # not a genuine "never recorded" (case a). Consume them per (block, cond) as
+    # we classify, so each dropped epoch accounts for at most one missing row.
+    dropped_pool: dict = {}
+    for d in (getattr(parsed, "nan_dropped_trials", []) or []):
+        # nan_dropped_trials cond is EEG vocab ('con'/'first'); normalise to beh.
+        dc = "con" if d.get("cond") == "con" else "inc"
+        key = (d.get("block"), dc)
+        dropped_pool.setdefault(key, 0)
+        dropped_pool[key] += 1
 
     for ar in alignment:
         blk = ar.block
@@ -247,23 +261,70 @@ def _flanker_context(subject_id: str) -> tuple[dict, List[dict]]:
                 tn = beh_block[beh_i].task_number
                 if tn is not None:
                     flanker_map[id(eeg_block[eeg_i])] = tn
-        # Behavioural rows with no EEG match → "missing" (EEG data not found).
+
+        # An EEG epoch that survived the pipeline but did NOT pair to any beh row
+        # (case c: alignment miss). Count per (block, cond) so we can attribute
+        # unmatched behavioural rows to a recoverable alignment failure rather
+        # than to absence.
+        unmatched_eeg_pool: dict = {}
+        for eeg_i in getattr(ar, "unmatched_eeg_indices", []) or []:
+            if 0 <= eeg_i < len(eeg_block):
+                et = eeg_block[eeg_i]
+                # EEG uses 'con'/'first'; normalise to the beh 'con'/'inc' vocab.
+                ec = "con" if et.cond == "con" else "inc"
+                unmatched_eeg_pool[ec] = unmatched_eeg_pool.get(ec, 0) + 1
+
+        # Behavioural rows with no EEG match → classify into the three causes.
         for beh_i in ar.unmatched_beh_indices:
-            if 0 <= beh_i < len(beh_block):
-                bt = beh_block[beh_i]
-                missing.append({
-                    "trial": bt.task_number,
-                    "btrial": (bt.live_row + 1) if bt.live_row is not None else None,
-                    "block": bt.block,
-                    "cond": "con" if bt.congruent else "inc",
-                    "condition": _condition_label("con" if bt.congruent else "inc"),
-                    "rt_ms": round(bt.response_time_ms, 1),
-                    "correct": bt.correct,
-                    "reason": "eeg data not found",
-                })
+            if not (0 <= beh_i < len(beh_block)):
+                continue
+            bt = beh_block[beh_i]
+            beh_cond = "con" if bt.congruent else "inc"
+            reason_code, reason = _classify_missing(
+                blk, beh_cond, dropped_pool, unmatched_eeg_pool
+            )
+            missing.append({
+                "trial": bt.task_number,
+                "btrial": (bt.live_row + 1) if bt.live_row is not None else None,
+                "block": bt.block,
+                "cond": beh_cond,
+                "condition": _condition_label(beh_cond),
+                "rt_ms": round(bt.response_time_ms, 1),
+                "correct": bt.correct,
+                "reason_code": reason_code,
+                "reason": reason,
+            })
 
     missing.sort(key=lambda m: (m["trial"] is None, m["trial"] or 0))
     return flanker_map, missing
+
+
+# The three non-equivalent causes a behavioural (flanker) trial can lack an
+# EEG counterpart (Doc 5 feedback item 3). Distinguishing them matters because
+# only (a) is true data loss; (b) belongs with Excluded; (c) is recoverable.
+_MISSING_REASONS = {
+    "dropped_epoch": "EEG epoch dropped (NaN/artifact in analysed window)",
+    "alignment_miss": "EEG present but RT alignment failed to pair it",
+    "not_recorded": "EEG never recorded for this trial",
+}
+
+
+def _classify_missing(block: int, cond: str, dropped_pool: dict, unmatched_eeg_pool: dict):
+    """Attribute one unmatched behavioural row to (b) dropped-epoch,
+    (c) alignment-miss, or (a) never-recorded — consuming from the per-block
+    pools so each dropped/unmatched EEG epoch explains at most one row.
+
+    Priority: a dropped epoch in the same (block, cond) is the most specific
+    explanation (b); otherwise an unmatched surviving EEG epoch in the same cond
+    means alignment failed (c); otherwise the EEG was never recorded (a)."""
+    dkey = (block, cond)
+    if dropped_pool.get(dkey, 0) > 0:
+        dropped_pool[dkey] -= 1
+        return "dropped_epoch", _MISSING_REASONS["dropped_epoch"]
+    if unmatched_eeg_pool.get(cond, 0) > 0:
+        unmatched_eeg_pool[cond] -= 1
+        return "alignment_miss", _MISSING_REASONS["alignment_miss"]
+    return "not_recorded", _MISSING_REASONS["not_recorded"]
 
 
 def _trial_row(t: TrialResult, flanker_map: Optional[dict] = None) -> dict:
