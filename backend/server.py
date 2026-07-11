@@ -428,13 +428,70 @@ def _group_stats(diffs: List[float]) -> dict:
     return out
 
 
+def _classify_incomplete(entry: dict, r, hz_map: Dict[int, str], measure_key: str) -> None:
+    """Explain why a subject that HAS a refresh ordering still lacks two usable
+    conditions, distinguishing a benign data gap from a fixable upstream fault.
+
+    Sets ``exclusion_kind`` / ``fixable`` / ``note`` on ``entry``:
+      * ``block_unreconciled`` (fixable=True): the ordering names a block the
+        recording has NO trials for — an aborted-block / block-selection / merge
+        failure the analyst should investigate before dropping the subject.
+      * ``condition_all_excluded`` (fixable=False): the block exists but every
+        trial in it was rejected (artifact / RT filter) — correctly excluded.
+      * ``single_condition_ordering`` (fixable=False): the ordering itself only
+        lists one refresh rate, so no 60-vs-165 difference can be formed.
+    """
+    expected_blocks = set(hz_map)
+    expected_labels = set(hz_map.values())
+    blocks_present = {t.block for t in r.trials}
+    missing_blocks = sorted(b for b in expected_blocks if b not in blocks_present)
+    filt = "RT filter" if measure_key == "rt_ms" else "artifact rejection"
+
+    if len(expected_labels) < 2:
+        entry["exclusion_kind"] = "single_condition_ordering"
+        entry["fixable"] = False
+        entry["note"] = (
+            "Demographics ordering lists only one refresh condition "
+            f"({', '.join(sorted(expected_labels)) or 'none'}) — cannot form a "
+            "60-vs-165 difference."
+        )
+    elif missing_blocks:
+        labs = ", ".join(f"block {b} ({hz_map[b]})" for b in missing_blocks)
+        entry["exclusion_kind"] = "block_unreconciled"
+        entry["fixable"] = True
+        entry["note"] = (
+            f"Ordering expects {labs} but the recording has no trials there — "
+            "blocks not reconciled to the ordering (possible aborted-block / "
+            "merge issue). Fixable upstream: investigate before dropping."
+        )
+    else:
+        missing_labels = sorted(set(hz_map.values()) - set(entry["conditions"].keys()))
+        entry["exclusion_kind"] = "condition_all_excluded"
+        entry["fixable"] = False
+        entry["note"] = (
+            f"All trials in {', '.join(missing_labels) or 'one condition'} were "
+            f"excluded ({filt}) — no data left for that condition."
+        )
+
+
 def _refresh_measure_payload(measure_key: str) -> dict:
-    """Build the per-participant + group payload for one measure."""
+    """Build the per-participant + group payload for one measure.
+
+    Per participant we report BOTH the median (primary) and the mean of the
+    included trial values in each refresh condition, and the signed high−low
+    difference computed each way. The median is primary: RT is right-skewed and,
+    for the power measures, a median is robust to a residual sub-threshold
+    artifact that would drag a mean. The mean is carried alongside for the export
+    and the on-screen inspection toggle. The group headline (see ``group``)
+    summarises the per-participant *median* differences with their MEAN Δ — the
+    statistic matching the paired t-test — plus median/SD/95% CI as robustness.
+    """
     spec = _REFRESH_MEASURES[measure_key]
     dp = spec["decimals"]
 
     participants = []
-    diffs = []
+    diffs_median = []
+    diffs_mean = []
     vals_low = []
     vals_high = []
     rate_labels = set()
@@ -445,12 +502,20 @@ def _refresh_measure_payload(measure_key: str) -> dict:
             "result_id": rid,
             "filename": r.filename,
             "has_both": False,
-            "conditions": {},     # hz_label -> {mean, n, trials:[...]}
-            "diff": None,
+            "conditions": {},     # hz_label -> {median, mean, n, trials:[...]}
+            "diff": None,         # primary (median-based) high−low
+            "diff_median": None,
+            "diff_mean": None,
             "note": None,
+            "exclusion_kind": None,
+            "fixable": False,
         }
         if not hz_map:
-            entry["note"] = "no demographics block order — cannot assign refresh rate"
+            entry["note"] = (
+                "No refresh-rate ordering in demographics — subject correctly "
+                "excluded from this comparison."
+            )
+            entry["exclusion_kind"] = "no_ordering"
             participants.append(entry)
             continue
 
@@ -458,7 +523,12 @@ def _refresh_measure_payload(measure_key: str) -> dict:
         if measure_key in ("theta_rel", "beta_rel"):
             chan_sum = r.theta_summary if measure_key == "theta_rel" else r.beta_summary
             if getattr(chan_sum, "channel_excluded", False):
-                entry["note"] = f"{spec['channel']} channel excluded — {chan_sum.exclusion_reason or 'contamination'}"
+                entry["note"] = (
+                    f"{spec['channel']} channel excluded — "
+                    f"{chan_sum.exclusion_reason or 'contamination'}. "
+                    "Power not reported for this band."
+                )
+                entry["exclusion_kind"] = "channel_excluded"
                 participants.append(entry)
                 continue
 
@@ -477,6 +547,7 @@ def _refresh_measure_payload(measure_key: str) -> dict:
             rate_labels.add(label)
             values = [v for _, _, v in rows]
             entry["conditions"][label] = {
+                "median": round(float(np.median(values)), dp),
                 "mean": round(float(np.mean(values)), dp),
                 "n": len(values),
                 "trials": [
@@ -487,6 +558,8 @@ def _refresh_measure_payload(measure_key: str) -> dict:
 
         if len(entry["conditions"]) >= 2:
             entry["has_both"] = True
+        else:
+            _classify_incomplete(entry, r, hz_map, measure_key)
         participants.append(entry)
 
     # Resolve the two refresh rates present, ordered low -> high.
@@ -494,27 +567,46 @@ def _refresh_measure_payload(measure_key: str) -> dict:
     low = ordered_rates[0] if ordered_rates else None
     high = ordered_rates[-1] if len(ordered_rates) >= 2 else None
 
-    # Compute per-participant differences (high − low) where both exist.
+    # Per-participant differences (high − low), computed both ways. The signed
+    # direction (high − low) is identical everywhere — screen, provenance, CSV.
     for entry in participants:
         conds = entry["conditions"]
         if low and high and low in conds and high in conds:
-            d = round(conds[high]["mean"] - conds[low]["mean"], dp)
-            entry["diff"] = d
-            diffs.append(d)
-            vals_low.append(conds[low]["mean"])
-            vals_high.append(conds[high]["mean"])
+            dmed = round(conds[high]["median"] - conds[low]["median"], dp)
+            dmean = round(conds[high]["mean"] - conds[low]["mean"], dp)
+            entry["diff_median"] = dmed
+            entry["diff_mean"] = dmean
+            entry["diff"] = dmed  # primary
+            diffs_median.append(dmed)
+            diffs_mean.append(dmean)
+            vals_low.append(conds[low]["median"])
+            vals_high.append(conds[high]["median"])
             entry["has_both"] = True
         else:
             entry["has_both"] = False
+            # A subject with the ordering but not both conditions still needs a
+            # reason (unless one was already assigned above).
+            if entry["exclusion_kind"] is None:
+                hz_map = _block_hz_map(entry["filename"])
+                if hz_map:
+                    _classify_incomplete(entry, _results[entry["result_id"]],
+                                         hz_map, measure_key)
 
-    group = _group_stats(diffs)
+    # Primary group summary: over the per-participant MEDIAN differences.
+    group = _group_stats(diffs_median)
     if vals_low:
         group["mean_low"] = round(float(np.mean(vals_low)), dp)
         group["mean_high"] = round(float(np.mean(vals_high)), dp)
-    # Round the group diff stats to a sensible precision.
     for k in ("mean_diff", "median_diff", "sd_diff", "sem_diff", "ci95_lo", "ci95_hi"):
         if group.get(k) is not None:
             group[k] = round(group[k], dp)
+
+    # Robustness: the same summary computed over the per-participant MEAN
+    # differences (reported alongside; not the headline).
+    group_from_means = _group_stats(diffs_mean)
+    for k in ("mean_diff", "median_diff", "sd_diff", "sem_diff", "ci95_lo", "ci95_hi"):
+        if group_from_means.get(k) is not None:
+            group_from_means[k] = round(group_from_means[k], dp)
 
     return {
         "key": measure_key,
@@ -528,6 +620,7 @@ def _refresh_measure_payload(measure_key: str) -> dict:
         "diff_label": (f"{high} − {low}" if low and high else None),
         "participants": participants,
         "group": group,
+        "group_from_means": group_from_means,
         "provenance": _measure_provenance(measure_key, low, high),
     }
 
@@ -631,16 +724,22 @@ def _measure_provenance(measure_key: str, low: str, high: str) -> dict:
         "retained": True,
     })
     stages.append({
-        "stage": f"{'8' if is_power else '4'}. Average per condition",
-        "detail": f"Mean of the included trial values within each refresh "
-                  f"condition ({low} and {high}) for this participant.",
+        "stage": f"{'8' if is_power else '4'}. Aggregate per condition",
+        "detail": f"Median of the included trial values within each refresh "
+                  f"condition ({low} and {high}) for this participant "
+                  "(median is primary — robust to skew and residual sub-threshold "
+                  "artifact; the mean is also computed and carried in the export "
+                  "and the on-screen inspection toggle).",
         "values": {},
         "retained": True,
     })
     stages.append({
         "stage": f"{'9' if is_power else '5'}. Difference",
-        "detail": f"Δ = {high} mean − {low} mean (per participant), then "
-                  "summarised across the sample (mean, median, SD, 95% CI).",
+        "detail": f"Δ = {high} − {low} per participant (same signed direction "
+                  "everywhere: screen, trace and CSV). The per-participant medians "
+                  "are then summarised across the sample with their MEAN Δ (the "
+                  "statistic matching the paired t-test), plus median Δ, SD and "
+                  "95% CI as robustness checks.",
         "values": {},
         "retained": True,
     })
@@ -1541,14 +1640,22 @@ async def download_summary_csv_all():
 @app.get("/api/download-csv-refresh")
 async def download_refresh_csv():
     """60 Hz vs 165 Hz comparison as CSV: one row per participant × measure,
-    plus a group-summary row per measure."""
+    plus a group-summary row per measure.
+
+    Both aggregations are carried per condition (``_median`` — the documented
+    primary — and ``_mean``) with the signed high−low difference computed each
+    way. These are the fixed computed values; they do NOT follow the on-screen
+    inspection toggle, so the export is identical regardless of the UI state.
+    The high−low sign is identical everywhere (screen, trace, CSV, SPSS).
+    """
     if not _results:
         raise HTTPException(404, "No results.")
     header = [
         "measure", "channel", "unit", "result_id", "filename",
-        "rate_low", "rate_low_mean", "rate_low_n",
-        "rate_high", "rate_high_mean", "rate_high_n",
-        "diff_high_minus_low", "note",
+        "rate_low", "rate_low_median", "rate_low_mean", "rate_low_n",
+        "rate_high", "rate_high_median", "rate_high_mean", "rate_high_n",
+        "diff_high_minus_low_median", "diff_high_minus_low_mean",
+        "exclusion_kind", "fixable", "note",
     ]
     rows = []
     for m in (_refresh_measure_payload(k) for k in _REFRESH_MEASURES):
@@ -1557,16 +1664,29 @@ async def download_refresh_csv():
             hi = p["conditions"].get(m["rate_high"]) if m["rate_high"] else None
             rows.append([
                 m["label"], m["channel"], m["unit"], p["result_id"], p["filename"],
-                m["rate_low"] or "", lo["mean"] if lo else "", lo["n"] if lo else "",
-                m["rate_high"] or "", hi["mean"] if hi else "", hi["n"] if hi else "",
-                p["diff"] if p["diff"] is not None else "", p["note"] or "",
+                m["rate_low"] or "",
+                lo["median"] if lo else "", lo["mean"] if lo else "", lo["n"] if lo else "",
+                m["rate_high"] or "",
+                hi["median"] if hi else "", hi["mean"] if hi else "", hi["n"] if hi else "",
+                p["diff_median"] if p["diff_median"] is not None else "",
+                p["diff_mean"] if p["diff_mean"] is not None else "",
+                p.get("exclusion_kind") or "",
+                ("yes" if p.get("fixable") else "no") if p.get("exclusion_kind") else "",
+                p["note"] or "",
             ])
-        g = m["group"]
+        g = m["group"]           # over per-participant MEDIAN diffs (primary)
+        gm = m["group_from_means"]  # over per-participant MEAN diffs (robustness)
         rows.append([
             f"{m['label']} — GROUP SUMMARY", m["channel"], m["unit"], "", "",
-            f"mean_diff={g['mean_diff']}", f"median_diff={g['median_diff']}", f"n={g['n']}",
-            f"sd={g['sd_diff']}", f"ci95_lo={g['ci95_lo']}", f"ci95_hi={g['ci95_hi']}",
-            g["mean_diff"] if g["mean_diff"] is not None else "", "",
+            f"median-agg: mean_diff={g['mean_diff']}", f"median_diff={g['median_diff']}",
+            f"sd={g['sd_diff']}", f"n={g['n']}",
+            f"mean-agg: mean_diff={gm['mean_diff']}", f"median_diff={gm['median_diff']}",
+            f"sd={gm['sd_diff']}", f"n={gm['n']}",
+            g["mean_diff"] if g["mean_diff"] is not None else "",
+            gm["mean_diff"] if gm["mean_diff"] is not None else "",
+            "", "",
+            f"primary=median aggregation; 95% CI(median-agg)="
+            f"[{g['ci95_lo']}, {g['ci95_hi']}]",
         ])
     return _csv_response(rows, header, "eeg_refresh_60_vs_165.csv")
 

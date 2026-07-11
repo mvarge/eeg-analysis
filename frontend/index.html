@@ -407,12 +407,25 @@
                 </div>
             </div>
             <p class="refresh-intro">
-                For each measure: every participant's mean in the 60 Hz and 165 Hz
+                For each measure: every participant's value in the 60 Hz and 165 Hz
                 conditions, and the difference (<strong>165 Hz − 60 Hz</strong>).
-                The headline is the group summary of those differences. Conditions
-                are assigned from each participant's refresh-rate ordering, not
-                block number. Click any chart to see how a number was computed.
+                Per-participant values are the <strong>median</strong> of that
+                condition's included trials (robust to skew/artifact); the group
+                headline is the <strong>mean Δ</strong> of those per-participant
+                differences (matching the paired t-test), with median Δ / SD / 95%
+                CI alongside. Conditions are assigned from each participant's
+                refresh-rate ordering, not block number. Click any chart to see how
+                a number was computed.
             </p>
+            <div class="refresh-toolbar">
+                <span class="refresh-toolbar-label">Per-participant values (inspection only):</span>
+                <div class="seg-toggle" id="refresh-agg-toggle" role="group" aria-label="Per-participant aggregation">
+                    <button type="button" class="seg-btn active" data-agg="median">Median</button>
+                    <button type="button" class="seg-btn" data-agg="mean">Mean</button>
+                    <button type="button" class="seg-btn" data-agg="both">Side by side</button>
+                </div>
+                <span class="refresh-toolbar-note">Export always carries both; the group headline is unaffected.</span>
+            </div>
             <div id="refresh-warning" class="refresh-warning" hidden></div>
             <div id="refresh-measures" class="refresh-measures"></div>
 

@@ -1694,6 +1694,11 @@ function goToUpload() {
 // Holds the last-fetched payload so the provenance modal can look up the exact
 // numbers behind a clicked chart.
 let refreshData = null;
+// Per-participant display aggregation for the refresh view: 'median' (primary),
+// 'mean', or 'both' (side by side). Inspection only — it never changes the group
+// headline (always mean Δ of per-participant medians) nor the CSV export (always
+// carries both aggregations).
+let refreshAgg = 'median';
 
 async function showRefreshComparison() {
     let data;
@@ -1717,27 +1722,106 @@ async function showRefreshComparison() {
     document.getElementById('refresh-section').hidden = false;
     saveSession({ view: 'refresh' });
 
-    // Warn if some subjects couldn't be assigned a refresh rate.
-    const warnEl = document.getElementById('refresh-warning');
-    const missing = data.n_subjects - data.n_with_refresh_order;
-    if (missing > 0) {
-        warnEl.hidden = false;
-        warnEl.textContent = `⚠ ${missing} of ${data.n_subjects} subject(s) have no demographics refresh-rate ordering and are excluded from this comparison. Upload a matching demographics CSV to include them.`;
-    } else {
-        warnEl.hidden = true;
-    }
+    // List subjects excluded from the group stats, with WHY — distinguishing a
+    // benign data gap (safely excluded) from a fixable upstream block/merge fault.
+    renderRefreshExclusions(data);
 
     renderRefreshMeasures(data.measures);
 }
 
+// Collect the excluded subjects across measures and explain each. A subject can
+// be excluded for different reasons per measure (e.g. beta channel excluded but
+// theta fine), so we key by subject and list the measures affected.
+function renderRefreshExclusions(data) {
+    const warnEl = document.getElementById('refresh-warning');
+    if (!warnEl) return;
+
+    // subject -> { filename, reasons: Map<note, {kind, fixable, measures:[]}> }
+    const bySubject = new Map();
+    for (const m of data.measures) {
+        for (const p of m.participants) {
+            if (p.has_both) continue;
+            if (!bySubject.has(p.result_id)) {
+                bySubject.set(p.result_id, { filename: p.filename, items: new Map() });
+            }
+            const entry = bySubject.get(p.result_id);
+            const note = p.note || 'excluded';
+            if (!entry.items.has(note)) {
+                entry.items.set(note, { kind: p.exclusion_kind, fixable: !!p.fixable, measures: [] });
+            }
+            entry.items.get(note).measures.push(m.label);
+        }
+    }
+
+    if (bySubject.size === 0) {
+        warnEl.hidden = true;
+        warnEl.innerHTML = '';
+        return;
+    }
+
+    const anyFixable = [...bySubject.values()].some(s =>
+        [...s.items.values()].some(i => i.fixable));
+
+    const cards = [...bySubject.values()].map(s => {
+        const items = [...s.items.entries()].map(([note, info]) => {
+            const badge = info.fixable
+                ? '<span class="rx-badge rx-fixable">fixable upstream</span>'
+                : '<span class="rx-badge rx-benign">safely excluded</span>';
+            const meas = info.measures.length < 3
+                ? ` <span class="rx-measures">(${info.measures.map(escapeHtml).join(', ')})</span>`
+                : '';
+            return `<li>${badge} ${escapeHtml(note)}${meas}</li>`;
+        }).join('');
+        return `<div class="rx-subject">
+            <div class="rx-name">${escapeHtml(s.filename)}</div>
+            <ul class="rx-reasons">${items}</ul>
+        </div>`;
+    }).join('');
+
+    warnEl.hidden = false;
+    warnEl.classList.toggle('refresh-warning-alert', anyFixable);
+    warnEl.innerHTML = `
+        <div class="rx-head">${bySubject.size} subject(s) excluded from the group comparison${anyFixable ? ' — one or more may be a fixable upstream problem' : ''}:</div>
+        ${cards}`;
+}
+
 function renderRefreshMeasures(measures) {
     const wrap = document.getElementById('refresh-measures');
+    // Column layout depends on the inspection toggle. 'both' shows median AND
+    // mean side by side for each condition + both diffs; otherwise one value each.
+    const agg = refreshAgg;
+    const valCols = (agg === 'both')
+        ? ['median', 'mean']
+        : [agg];
+
+    // Build the value cell(s) for one condition of one participant.
+    function condCells(cond, dp) {
+        if (!cond) return valCols.map(() => '<td>—</td>').join('');
+        return valCols.map(a =>
+            `<td>${fmtNum(cond[a], dp)} <span class="rr-n">n=${cond.n}</span></td>`).join('');
+    }
+    function condCellsIncomplete(cond, dp) {
+        if (!cond) return valCols.map(() => '<td>—</td>').join('');
+        return valCols.map(a => `<td>${fmtNum(cond[a], dp)}</td>`).join('');
+    }
+    // The Δ cell(s): in 'both' mode show median Δ and mean Δ; else the chosen one.
+    function diffCells(p, dp) {
+        const keys = (agg === 'both') ? ['diff_median', 'diff_mean'] : [agg === 'mean' ? 'diff_mean' : 'diff_median'];
+        return keys.map(k => {
+            const d = p[k];
+            const cls = d > 0 ? 'rr-up' : (d < 0 ? 'rr-down' : '');
+            return `<td class="${cls}">${d > 0 ? '+' : ''}${fmtNum(d, dp)}</td>`;
+        }).join('');
+    }
+
     wrap.innerHTML = measures.map((m, i) => {
         const g = m.group;
+        const gm = m.group_from_means;
         const dp = m.decimals;
         const diffLabel = m.diff_label || '165 Hz − 60 Hz';
 
-        // Headline group summary.
+        // Headline group summary — ALWAYS mean Δ of per-participant medians,
+        // regardless of the inspection toggle.
         const groupHtml = g.n === 0
             ? `<div class="refresh-group-empty">No participant has both refresh conditions yet.</div>`
             : `
@@ -1747,31 +1831,44 @@ function renderRefreshMeasures(measures) {
                 <div class="rg-stat"><span class="rg-num">${g.sd_diff == null ? '—' : fmtNum(g.sd_diff, dp)}</span><span class="rg-lab">SD</span></div>
                 <div class="rg-stat"><span class="rg-num">${g.ci95_lo == null ? '—' : `${fmtNum(g.ci95_lo, dp)}…${fmtNum(g.ci95_hi, dp)}`}</span><span class="rg-lab">95% CI</span></div>
                 <div class="rg-stat"><span class="rg-num">${g.n}</span><span class="rg-lab">participants</span></div>
-            </div>`;
+            </div>
+            <div class="refresh-group-robust">Robustness (mean-aggregated): mean Δ ${fmtNum(gm.mean_diff, dp)} · median Δ ${fmtNum(gm.median_diff, dp)} · SD ${gm.sd_diff == null ? '—' : fmtNum(gm.sd_diff, dp)}</div>`;
 
         // Per-participant table.
         const rows = m.participants.map(p => {
             const lo = p.conditions[m.rate_low];
             const hi = p.conditions[m.rate_high];
+            const span = valCols.length * 2 + (agg === 'both' ? 2 : 1) + 1;
             if (!p.has_both) {
                 const note = p.note || 'only one refresh condition present';
+                const badge = p.fixable
+                    ? '<span class="rx-badge rx-fixable">fixable</span> '
+                    : (p.exclusion_kind ? '<span class="rx-badge rx-benign">excluded</span> ' : '');
                 return `<tr class="rr-incomplete">
                     <td>${escapeHtml(p.filename)}</td>
-                    <td>${lo ? fmtNum(lo.mean, dp) : '—'}</td>
-                    <td>${hi ? fmtNum(hi.mean, dp) : '—'}</td>
-                    <td>—</td>
-                    <td class="rr-note" colspan="1">${escapeHtml(note)}</td>
+                    ${condCellsIncomplete(lo, dp)}
+                    ${condCellsIncomplete(hi, dp)}
+                    ${(agg === 'both' ? '<td>—</td><td>—</td>' : '<td>—</td>')}
+                    <td class="rr-note">${badge}${escapeHtml(note)}</td>
                 </tr>`;
             }
-            const dirClass = p.diff > 0 ? 'rr-up' : (p.diff < 0 ? 'rr-down' : '');
             return `<tr>
                 <td>${escapeHtml(p.filename)}</td>
-                <td>${fmtNum(lo.mean, dp)} <span class="rr-n">n=${lo.n}</span></td>
-                <td>${fmtNum(hi.mean, dp)} <span class="rr-n">n=${hi.n}</span></td>
-                <td class="${dirClass}">${p.diff > 0 ? '+' : ''}${fmtNum(p.diff, dp)}</td>
+                ${condCells(lo, dp)}
+                ${condCells(hi, dp)}
+                ${diffCells(p, dp)}
                 <td></td>
             </tr>`;
         }).join('');
+
+        // Header cells depend on the toggle.
+        const aggTag = (a) => `<span class="th-agg">${a}</span>`;
+        const condHead = (label) => (agg === 'both')
+            ? `<th>${escapeHtml(label)} ${aggTag('median')}</th><th>${escapeHtml(label)} ${aggTag('mean')}</th>`
+            : `<th>${escapeHtml(label)} ${aggTag(agg)}</th>`;
+        const diffHead = (agg === 'both')
+            ? `<th>Δ ${aggTag('median')}</th><th>Δ ${aggTag('mean')}</th>`
+            : `<th>Δ (${escapeHtml(diffLabel)}) ${aggTag(agg)}</th>`;
 
         return `
         <div class="refresh-measure" data-measure="${m.key}">
@@ -1789,9 +1886,9 @@ function renderRefreshMeasures(measures) {
                 <table class="compare-table refresh-table">
                     <thead><tr>
                         <th>Participant</th>
-                        <th>${escapeHtml(m.rate_low || 'lower')}</th>
-                        <th>${escapeHtml(m.rate_high || 'higher')}</th>
-                        <th>Δ (${escapeHtml(diffLabel)})</th>
+                        ${condHead(m.rate_low || 'lower')}
+                        ${condHead(m.rate_high || 'higher')}
+                        ${diffHead}
                         <th></th>
                     </tr></thead>
                     <tbody>${rows}</tbody>
@@ -1815,7 +1912,9 @@ function renderRefreshMeasures(measures) {
     });
 }
 
-// Grouped bar: per participant, the two refresh-condition means side by side.
+// Grouped bar: per participant, the two refresh-condition values side by side.
+// Uses the selected inspection aggregation (median primary / mean); in 'both'
+// mode it plots the median (the primary) to keep the chart readable.
 function drawRefreshChart(containerId, m) {
     const complete = m.participants.filter(p => p.has_both);
     if (!complete.length) {
@@ -1823,20 +1922,21 @@ function drawRefreshChart(containerId, m) {
             '<div class="refresh-chart-empty">Need at least one participant with both 60 Hz and 165 Hz conditions to plot.</div>';
         return;
     }
+    const a = (refreshAgg === 'mean') ? 'mean' : 'median';
     const names = complete.map(p => p.filename);
-    const lo = complete.map(p => p.conditions[m.rate_low].mean);
-    const hi = complete.map(p => p.conditions[m.rate_high].mean);
+    const lo = complete.map(p => p.conditions[m.rate_low][a]);
+    const hi = complete.map(p => p.conditions[m.rate_high][a]);
 
     const traces = [
         {
             type: 'bar', name: m.rate_low, x: names, y: lo,
             marker: { color: CON_COLOR },
-            hovertemplate: `%{x}<br>${m.rate_low}: %{y}<extra></extra>`,
+            hovertemplate: `%{x}<br>${m.rate_low} (${a}): %{y}<extra></extra>`,
         },
         {
             type: 'bar', name: m.rate_high, x: names, y: hi,
             marker: { color: INC_COLOR },
-            hovertemplate: `%{x}<br>${m.rate_high}: %{y}<extra></extra>`,
+            hovertemplate: `%{x}<br>${m.rate_high} (${a}): %{y}<extra></extra>`,
         },
     ];
     const layout = {
@@ -1884,29 +1984,35 @@ function openProvenance(measureKey) {
             const hi = p.conditions[m.rate_high];
             return `<tr>
                 <td>${escapeHtml(p.filename)}</td>
-                <td>${fmtNum(lo.mean, dp)} <span class="rr-n">(mean of ${lo.n})</span></td>
-                <td>${fmtNum(hi.mean, dp)} <span class="rr-n">(mean of ${hi.n})</span></td>
-                <td>${p.diff > 0 ? '+' : ''}${fmtNum(p.diff, dp)}</td>
+                <td>${fmtNum(lo.median, dp)} <span class="rr-n">(median of ${lo.n}; mean ${fmtNum(lo.mean, dp)})</span></td>
+                <td>${fmtNum(hi.median, dp)} <span class="rr-n">(median of ${hi.n}; mean ${fmtNum(hi.mean, dp)})</span></td>
+                <td>${p.diff_median > 0 ? '+' : ''}${fmtNum(p.diff_median, dp)} <span class="rr-n">(mean-agg ${p.diff_mean > 0 ? '+' : ''}${fmtNum(p.diff_mean, dp)})</span></td>
             </tr>`;
         }).join('');
         const g = m.group;
+        const gm = m.group_from_means;
         exampleHtml = `
         <h4 class="prov-h4">Worked values for this measure</h4>
+        <p class="prov-note">Per-participant values are medians (primary); the mean
+        is shown in parentheses for comparison. The signed Δ direction
+        (${escapeHtml(m.diff_label || '165 − 60')}) is identical here, on screen and in the CSV.</p>
         <div class="compare-table-wrap">
             <table class="compare-table refresh-table">
                 <thead><tr>
-                    <th>Participant</th><th>${escapeHtml(m.rate_low)} mean</th>
-                    <th>${escapeHtml(m.rate_high)} mean</th><th>Δ</th>
+                    <th>Participant</th><th>${escapeHtml(m.rate_low)} median</th>
+                    <th>${escapeHtml(m.rate_high)} median</th><th>Δ (median-agg)</th>
                 </tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         </div>
         <div class="prov-headline">
-            Group: mean Δ = <strong>${fmtNum(g.mean_diff, dp)}</strong>,
+            Group (primary, median-aggregated): mean Δ = <strong>${fmtNum(g.mean_diff, dp)}</strong>,
             median Δ = <strong>${fmtNum(g.median_diff, dp)}</strong>,
             SD = ${g.sd_diff == null ? '—' : fmtNum(g.sd_diff, dp)},
             95% CI = ${g.ci95_lo == null ? '—' : `[${fmtNum(g.ci95_lo, dp)}, ${fmtNum(g.ci95_hi, dp)}]`},
-            N = ${g.n}.
+            N = ${g.n}.<br>
+            Robustness (mean-aggregated): mean Δ = <strong>${fmtNum(gm.mean_diff, dp)}</strong>,
+            median Δ = ${fmtNum(gm.median_diff, dp)}, SD = ${gm.sd_diff == null ? '—' : fmtNum(gm.sd_diff, dp)}.
         </div>`;
     }
 
@@ -2046,6 +2152,21 @@ function initActions() {
     document.getElementById('btn-refresh-download').addEventListener('click', () => {
         window.location.href = `${API}/api/download-csv-refresh`;
     });
+
+    // Per-participant aggregation toggle (median / mean / side by side).
+    // Inspection only: re-renders the tables and charts from the already-loaded
+    // data; never re-fetches, never touches the group headline or the export.
+    const aggToggle = document.getElementById('refresh-agg-toggle');
+    if (aggToggle) {
+        aggToggle.querySelectorAll('.seg-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                refreshAgg = btn.dataset.agg;
+                aggToggle.querySelectorAll('.seg-btn').forEach(b =>
+                    b.classList.toggle('active', b === btn));
+                if (refreshData) renderRefreshMeasures(refreshData.measures);
+            });
+        });
+    }
 
     // Provenance modal close (button, overlay click, Escape)
     document.getElementById('prov-close').addEventListener('click', closeProvenance);
