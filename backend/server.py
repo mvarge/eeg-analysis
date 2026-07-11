@@ -40,6 +40,7 @@ from pipeline import (
     HP_HZ, WIN_S, PAD_S, REACH_S, THETA_BAND, BETA_BAND, TOTAL_BAND, FREQ_STEP,
     THETA_CYC, BETA_CYC,
     run_pipeline, reconstruct_epoch, recording_overview,
+    recompute_after_response_errors,
 )
 from demographics import (
     Demographic, DISPLAY_FIELDS,
@@ -338,6 +339,13 @@ def _trial_row(t: TrialResult, flanker_map: Optional[dict] = None) -> dict:
     task_number = None
     if flanker_map is not None:
         task_number = flanker_map.get(id(t))
+    # Doc 6: an incorrect flanker response excludes the trial from all analyses.
+    # Fold that into the reason string and the effective per-band flags so the
+    # frontend Excluded box shows it and states why.
+    reason = t.reason
+    if t.response_error:
+        incorrect_msg = "incorrect flanker response"
+        reason = f"{reason}; {incorrect_msg}" if reason else incorrect_msg
     return {
         "trial": t.trial,
         "btrial": t.btrial,
@@ -355,9 +363,12 @@ def _trial_row(t: TrialResult, flanker_map: Optional[dict] = None) -> dict:
         "impact": round(t.impact, 2),
         "coinc": round(t.coinc, 3),
         "blink": t.blink,
-        "fz_exclude": t.fz_exclude,
-        "c3_exclude": t.c3_exclude,
-        "reason": t.reason,
+        "fz_exclude": t.theta_excluded,
+        "c3_exclude": t.beta_excluded,
+        "fz_artifact": t.fz_exclude,
+        "c3_artifact": t.c3_exclude,
+        "response_error": t.response_error,
+        "reason": reason,
         "theta_abs": round(t.theta_abs, 3),
         "theta_rel": round(t.theta_rel, 4),
         "beta_abs":  round(t.beta_abs, 3),
@@ -454,6 +465,10 @@ def _block_hz_map(filename: str) -> Dict[int, str]:
 
 
 def _measure_trial_included(t: TrialResult, spec: dict) -> bool:
+    # Doc 6: incorrectly-responded trials are excluded from every measure,
+    # including RT (an error trial's reaction time is not comparable).
+    if getattr(t, "response_error", False):
+        return False
     if spec["value_attr"] == "rt_ms":
         return t.rt_ms is not None and t.rt_ms > 0
     return not bool(getattr(t, spec["exclude_attr"]))
@@ -699,7 +714,7 @@ def _measure_provenance(measure_key: str, low: str, high: str) -> dict:
     num_band = list(THETA_BAND) if band == "theta" else list(BETA_BAND)
     cyc = THETA_CYC if band == "theta" else BETA_CYC
     chan = "Fz-Pz" if measure_key == "theta_rel" else "C3-C4"
-    excl_flag = "fz_exclude" if measure_key == "theta_rel" else "c3_exclude"
+    excl_flag = "theta_excluded" if measure_key == "theta_rel" else "beta_excluded"
 
     stages = []
     stages.append({
@@ -1057,8 +1072,8 @@ _SOFT_FLAG_Z = 3.0
 def _epoch_deviation(result: PipelineResult, trial: TrialResult) -> dict:
     """Per-metric robust deviation of one trial vs the accepted-trial reference
     set, plus a soft-flag when a kept-but-borderline trial is detected."""
-    fz_accepted = [t for t in result.trials if not t.fz_exclude]
-    c3_accepted = [t for t in result.trials if not t.c3_exclude]
+    fz_accepted = [t for t in result.trials if not t.theta_excluded]
+    c3_accepted = [t for t in result.trials if not t.beta_excluded]
     ref = {"fz": fz_accepted, "c3": c3_accepted}
 
     metrics = {}
@@ -1073,7 +1088,7 @@ def _epoch_deviation(result: PipelineResult, trial: TrialResult) -> dict:
         dev["channel"] = "Fz-Pz" if chan == "fz" else "C3-C4"
         # This trial's accepted status on the reference channel: only soft-flag
         # metrics whose channel was KEPT (a contaminated-but-kept trial).
-        chan_kept = (not trial.fz_exclude) if chan == "fz" else (not trial.c3_exclude)
+        chan_kept = (not trial.theta_excluded) if chan == "fz" else (not trial.beta_excluded)
         dev["channel_kept"] = chan_kept
         if chan_kept and dev["robust_z"] is not None and abs(dev["robust_z"]) >= _SOFT_FLAG_Z:
             soft_flag = True
@@ -1193,7 +1208,10 @@ async def subject_recording(result_id: str, max_points: int = 12000):
         buf_end = onset_s + WIN_S + PAD_S
         # Keypress time relative to recording start (onset_s + reaction time).
         keypress_s = (onset_s + tr.rt_ms / 1000.0) if (tr.rt_ms and tr.rt_ms > 0) else None
-        included = not tr.fz_exclude and not tr.c3_exclude
+        included = not tr.theta_excluded and not tr.beta_excluded
+        reason = tr.reason
+        if tr.response_error:
+            reason = f"{reason}; incorrect flanker response" if reason else "incorrect flanker response"
         trials_out.append({
             "trial": tr.trial,
             "btrial": tr.btrial,
@@ -1208,9 +1226,10 @@ async def subject_recording(result_id: str, max_points: int = 12000):
             "buf_start_s": round(buf_start, 3),
             "buf_end_s": round(buf_end, 3),
             "included": included,
-            "fz_exclude": tr.fz_exclude,
-            "c3_exclude": tr.c3_exclude,
-            "reason": tr.reason,
+            "fz_exclude": tr.theta_excluded,
+            "c3_exclude": tr.beta_excluded,
+            "response_error": tr.response_error,
+            "reason": reason,
         })
 
     # Block spans (first onset .. last keypress within each block).
@@ -1404,12 +1423,11 @@ def _accuracy_payload(subject_id: str) -> List[dict]:
       - block, n_beh_trials, n_errors, accuracy
       - matched_correct_con / matched_correct_inc / matched_error_con /
         matched_error_inc among the aligned pairs
-      - eeg_surviving_after_error_exclusion:
-          survival counts on the ANALYSED EEG trials, after also dropping
-          any that matched a behavioural error trial (docs §4.3 says to
-          exclude these normally).
-    The primary EEG-only surviving counts are unaffected — this is an
-    auxiliary view.
+      - eeg_error_trials_dropped: the analysed EEG epochs actually EXCLUDED
+        from each band because they matched a behavioural error trial (Doc 6 —
+        this is now a real exclusion, not a hypothetical).
+    Accuracy is behavioural (independent of EEG artifact rejection); it is
+    reported for completeness alongside the primary RT/power measures.
     """
     if subject_id not in _results or subject_id not in _behavioural:
         return []
@@ -1446,22 +1464,15 @@ def _accuracy_payload(subject_id: str) -> List[dict]:
                     matched_e_inc += 1
                 error_eeg_indices.append(eeg_i)
 
-        # Recompute surviving counts on Fz-Pz and C3-C4 excluding error trials.
-        # Use result.trials filtered to this block.
-        eeg_surv_after = {"theta": 0, "beta": 0}
+        # EEG epochs actually dropped from each band because of an incorrect
+        # response (Doc 6). An error trial excludes both bands; report how many
+        # of the matched error trials fall in each band (they overlap fully with
+        # response_error, but a trial already artifact-excluded is counted once).
         eeg_excl_error = {"theta": 0, "beta": 0}
         for i, t in enumerate(eeg_block):
-            is_error = i in error_eeg_indices
-            if not t.fz_exclude:
-                if is_error:
-                    eeg_excl_error["theta"] += 1
-                else:
-                    eeg_surv_after["theta"] += 1
-            if not t.c3_exclude:
-                if is_error:
-                    eeg_excl_error["beta"] += 1
-                else:
-                    eeg_surv_after["beta"] += 1
+            if i in error_eeg_indices:
+                eeg_excl_error["theta"] += 1
+                eeg_excl_error["beta"] += 1
 
         per_block.append({
             "block": blk,
@@ -1472,7 +1483,6 @@ def _accuracy_payload(subject_id: str) -> List[dict]:
             "matched_correct_inc": matched_c_inc,
             "matched_error_con": matched_e_con,
             "matched_error_inc": matched_e_inc,
-            "eeg_surviving_after_error_exclusion": eeg_surv_after,
             "eeg_error_trials_dropped": eeg_excl_error,
         })
 
@@ -1518,7 +1528,42 @@ def _run_alignment(subject_id: str) -> List[AlignmentResult]:
             ar.eeg_offset_ms,
         )
     _alignment[subject_id] = per_block
+    _apply_response_errors(subject_id, per_block)
     return per_block
+
+
+def _apply_response_errors(subject_id: str, per_block: List[AlignmentResult]) -> None:
+    """Flag EEG trials aligned to an INCORRECT flanker response (Doc 6).
+
+    Cross-references the behavioural (flanker) CSV: any EEG trial matched to a
+    behavioural row the participant answered incorrectly gets
+    ``response_error = True`` and is thereby excluded from theta, beta AND RT
+    analyses (via the effective ``theta_excluded`` / ``beta_excluded`` props and
+    the RT inclusion filter). Recomputes the affected summaries + spectra.
+
+    Idempotent: every EEG trial's ``response_error`` is reset from the current
+    alignment each call, so re-uploading behavioural data re-derives cleanly.
+    """
+    if subject_id not in _results:
+        return
+    result = _results[subject_id]
+    session = _behavioural.get(subject_id)
+
+    # Reset first so a re-alignment (or removed behavioural file) is clean.
+    for t in result.trials:
+        t.response_error = False
+
+    if session is not None:
+        for ar in per_block:
+            blk = ar.block
+            eeg_block = [t for t in result.trials if t.block == blk]
+            beh_block = [t for t in session.trials if t.block == blk]
+            for eeg_i, beh_i in ar.matched_pairs:
+                if 0 <= eeg_i < len(eeg_block) and 0 <= beh_i < len(beh_block):
+                    if not beh_block[beh_i].correct:
+                        eeg_block[eeg_i].response_error = True
+
+    recompute_after_response_errors(result)
 
 
 @app.post("/api/behavioural/upload")
@@ -1657,6 +1702,10 @@ async def get_behavioural(subject_id: str):
 async def remove_behavioural(subject_id: str):
     _behavioural.pop(subject_id, None)
     _alignment.pop(subject_id, None)
+    # Doc 6: clearing behavioural data must undo the incorrect-response
+    # exclusions it drove, so the analysis reverts to the pure-EEG decision.
+    if subject_id in _results:
+        _apply_response_errors(subject_id, [])
     return {"status": "ok"}
 
 
@@ -1722,7 +1771,7 @@ def _csv_response(rows: List[list], header: list, filename: str) -> StreamingRes
 TRIAL_CSV_HEADER = [
     "recording", "trial", "block", "btrial", "block_hz", "cond", "onset", "key", "rt_ms",
     "fz_ptp", "theta_fft", "beta_fft", "maxz", "impact", "coinc",
-    "blink", "fz_exclude", "c3_exclude", "reason",
+    "blink", "fz_exclude", "c3_exclude", "response_error", "reason",
     "theta_abs", "theta_rel", "beta_abs", "beta_rel",
 ]
 
@@ -1753,12 +1802,18 @@ def _trial_csv_row(rec: str, t: TrialResult, demo_cols=None) -> list:
         demo_cols = _demographic_columns()
     demo = match_demographics(rec, _demographics) if _demographics else None
     block_hz = demo.block_order.get(t.block, "") if demo else ""
+    # fz_exclude/c3_exclude here carry the EFFECTIVE decision (EEG artifact OR
+    # incorrect flanker response, Doc 6); response_error breaks out the
+    # behavioural cause, and the reason string states it.
+    reason = t.reason
+    if t.response_error:
+        reason = f"{reason}; incorrect flanker response" if reason else "incorrect flanker response"
     row = [
         rec, t.trial, t.block, t.btrial, block_hz, t.cond,
         round(t.onset, 4), round(t.key, 4), t.rt_ms,
         round(t.fz_ptp, 4), round(t.theta_fft, 4), round(t.beta_fft, 4),
         round(t.maxz, 6), round(t.impact, 6), round(t.coinc, 6),
-        t.blink, t.fz_exclude, t.c3_exclude, t.reason,
+        t.blink, t.theta_excluded, t.beta_excluded, t.response_error, reason,
         round(t.theta_abs, 6), round(t.theta_rel, 6),
         round(t.beta_abs, 6),  round(t.beta_rel, 6),
     ]
@@ -1792,7 +1847,7 @@ async def download_trials_csv_all():
 
 
 EXCL_HEADER = ["recording", "trial", "block", "btrial", "cond", "rt_ms",
-               "fz_exclude", "c3_exclude", "reason"]
+               "fz_exclude", "c3_exclude", "response_error", "reason"]
 
 
 @app.get("/api/download-csv-exclusions/{result_id}")
@@ -1801,10 +1856,15 @@ async def download_exclusions_csv(result_id: str):
     if result_id not in _results:
         raise HTTPException(404, "Result not found.")
     r = _results[result_id]
+    def _excl_reason(t):
+        reason = t.reason
+        if t.response_error:
+            reason = f"{reason}; incorrect flanker response" if reason else "incorrect flanker response"
+        return reason
     rows = [
         [r.filename, t.trial, t.block, t.btrial, t.cond, t.rt_ms,
-         t.fz_exclude, t.c3_exclude, t.reason]
-        for t in r.trials if t.fz_exclude or t.c3_exclude
+         t.theta_excluded, t.beta_excluded, t.response_error, _excl_reason(t)]
+        for t in r.trials if t.theta_excluded or t.beta_excluded
     ]
     return _csv_response(rows, EXCL_HEADER, f"{result_id}_exclusions.csv")
 

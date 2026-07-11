@@ -120,6 +120,24 @@ class TrialResult:
     beta_abs: float
     beta_rel: float
 
+    # Behavioural cross-reference (Doc 6). True when this EEG trial was aligned
+    # to a flanker (OpenSesame) row that the participant answered INCORRECTLY.
+    # Such trials are excluded from ALL analyses (theta, beta, RT) — an
+    # incorrect response means the cognitive process of interest did not run to
+    # completion, so the epoch is not comparable. Set post-alignment by
+    # apply_response_errors(); False until behavioural data is aligned.
+    response_error: bool = False
+
+    @property
+    def theta_excluded(self) -> bool:
+        """Effective Fz-Pz/theta exclusion = EEG artifact OR incorrect response."""
+        return self.fz_exclude or self.response_error
+
+    @property
+    def beta_excluded(self) -> bool:
+        """Effective C3-C4/beta exclusion = EEG artifact OR incorrect response."""
+        return self.c3_exclude or self.response_error
+
 
 @dataclass
 class ChannelSummary:
@@ -491,8 +509,12 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
         ))
 
     # ---- Summaries ---------------------------------------------------------
-    theta_summary = _channel_summary(trial_results, "Fz-Pz", "theta", "fz_exclude")
-    beta_summary  = _channel_summary(trial_results, "C3-C4", "beta",  "c3_exclude")
+    # Use the EFFECTIVE per-band exclusion (EEG artifact OR incorrect response,
+    # Doc 6). At pipeline time no behavioural data is aligned yet, so
+    # response_error is False and this equals the pure-EEG decision; after
+    # alignment, recompute_after_response_errors() rebuilds these.
+    theta_summary = _channel_summary(trial_results, "Fz-Pz", "theta", "theta_excluded")
+    beta_summary  = _channel_summary(trial_results, "C3-C4", "beta",  "beta_excluded")
 
     # ---- Averaged wavelet spectra (surviving trials only, for plotting) ---
     def _mean_spec(spec: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -500,8 +522,8 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
             return np.zeros_like(FREQS)
         return spec[mask].mean(axis=0)
 
-    keep_theta = np.array([not t.fz_exclude for t in trial_results])
-    keep_beta  = np.array([not t.c3_exclude for t in trial_results])
+    keep_theta = np.array([not t.theta_excluded for t in trial_results])
+    keep_beta  = np.array([not t.beta_excluded for t in trial_results])
     con_mask   = np.array([t.cond == "con"   for t in trial_results])
     inc_mask   = np.array([t.cond == "first" for t in trial_results])
 
@@ -552,6 +574,64 @@ def apply_channel_exclusion(result: PipelineResult, channel: str, code: str, rea
             )
             return
     logger.error("apply_channel_exclusion: unknown channel %r", channel)
+
+
+def recompute_after_response_errors(result: PipelineResult) -> None:
+    """Rebuild summaries + averaged spectra after ``response_error`` flags change.
+
+    Doc 6: incorrectly-responded trials are excluded from all analyses. The
+    ``response_error`` flags are set post-alignment (behavioural upload), which
+    happens after ``run_pipeline`` has already built the summaries/spectra from
+    the pure-EEG decision. Call this whenever the flags are (re)assigned to fold
+    the behavioural exclusion into the theta/beta channel summaries and the
+    averaged wavelet spectra. Uses the effective ``theta_excluded`` /
+    ``beta_excluded`` properties (EEG artifact OR incorrect response).
+
+    Idempotent: it recomputes from ``theta_spec_all`` / ``beta_spec_all`` (the
+    retained per-trial spectra, unaffected by exclusion) and the current flags,
+    so repeated behavioural uploads converge to the same state. Preserves any
+    channel-scoped exclusion metadata already on the summaries.
+    """
+    trials = result.trials
+
+    # Preserve channel-scoped exclusion metadata across the rebuild.
+    prev = {
+        "Fz-Pz": (result.theta_summary.channel_excluded,
+                  result.theta_summary.exclusion_code,
+                  result.theta_summary.exclusion_reason),
+        "C3-C4": (result.beta_summary.channel_excluded,
+                  result.beta_summary.exclusion_code,
+                  result.beta_summary.exclusion_reason),
+    }
+
+    result.theta_summary = _channel_summary(trials, "Fz-Pz", "theta", "theta_excluded")
+    result.beta_summary  = _channel_summary(trials, "C3-C4", "beta",  "beta_excluded")
+    for summary, chan in ((result.theta_summary, "Fz-Pz"), (result.beta_summary, "C3-C4")):
+        exc, code, reason = prev[chan]
+        summary.channel_excluded = exc
+        summary.exclusion_code = code
+        summary.exclusion_reason = reason
+
+    FREQS = np.arange(TOTAL_BAND[0], TOTAL_BAND[1] + 1e-6, FREQ_STEP)
+    theta_spec = result.theta_spec_all
+    beta_spec = result.beta_spec_all
+
+    def _mean_spec(spec: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        if spec is None or len(spec) == 0 or not mask.any():
+            return np.zeros_like(FREQS)
+        return spec[mask].mean(axis=0)
+
+    keep_theta = np.array([not t.theta_excluded for t in trials])
+    keep_beta  = np.array([not t.beta_excluded for t in trials])
+    con_mask   = np.array([t.cond == "con"   for t in trials])
+    inc_mask   = np.array([t.cond == "first" for t in trials])
+
+    result.theta_spectrum_con = _mean_spec(theta_spec, keep_theta & con_mask)
+    result.theta_spectrum_inc = _mean_spec(theta_spec, keep_theta & inc_mask)
+    result.beta_spectrum_con  = _mean_spec(beta_spec,  keep_beta  & con_mask)
+    result.beta_spectrum_inc  = _mean_spec(beta_spec,  keep_beta  & inc_mask)
+    result.theta_spectrum_excluded = _mean_spec(theta_spec, ~keep_theta)
+    result.beta_spectrum_excluded  = _mean_spec(beta_spec,  ~keep_beta)
 
 
 def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude_attr: str) -> ChannelSummary:
