@@ -51,6 +51,27 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "   Dependencies installed"
 }
 
+# Free port 8000 from any stale server. A hard Ctrl+C (or a crash) can leave
+# an old python/uvicorn process alive still holding the port, so a fresh run
+# would fail to bind and keep serving the OLD code. Kill any lingering
+# listener first so every restart runs the freshly pulled code.
+Write-Host "-> Checking for a previous server on port 8000..."
+try {
+    $stale = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction Stop |
+             Select-Object -ExpandProperty OwningProcess -Unique
+} catch {
+    # Get-NetTCPConnection unavailable (older/Core hosts) -> fall back to netstat
+    $stale = netstat -ano | Select-String ":8000\s.*LISTENING" |
+             ForEach-Object { ($_ -split '\s+')[-1] } | Sort-Object -Unique
+}
+foreach ($procId in $stale) {
+    if ($procId -and $procId -ne 0) {
+        Write-Host "   Stopping stale server (PID $procId)..."
+        taskkill /F /PID $procId 2>&1 | Out-Null
+    }
+}
+if ($stale) { Start-Sleep -Seconds 1 }
+
 Write-Host ""
 Write-Host "-> Starting server..."
 Write-Host "   Open http://localhost:8000 in your browser"

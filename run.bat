@@ -82,6 +82,26 @@ if errorlevel 1 (
     echo   Dependencies installed.
 )
 
+REM ---- Free port 8000 from any stale server -------------------
+REM Ctrl+C in a .bat window often leaves the child python/uvicorn
+REM process alive, still holding the port. A fresh run would then
+REM fail to bind and you'd keep serving the OLD code. Kill any
+REM lingering listener on 8000 before starting, so every restart
+REM guarantees the freshly pulled code is what actually runs.
+echo Checking for a previous server on port 8000...
+set "STALE_PIDS="
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr /r /c:":8000 .*LISTENING"') do (
+    if not "%%P"=="0" (
+        echo   Stopping stale server ^(PID %%P^)...
+        taskkill /F /PID %%P >nul 2>nul
+        set "STALE_PIDS=1"
+    )
+)
+if defined STALE_PIDS (
+    REM give Windows a moment to release the socket
+    timeout /t 1 /nobreak >nul
+)
+
 REM ---- Open browser after a short delay -----------------------
 echo.
 echo Starting server on http://localhost:8000

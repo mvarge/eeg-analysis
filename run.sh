@@ -34,6 +34,25 @@ if ! python -c "import fastapi" 2>/dev/null; then
     echo "  ✓ Dependencies installed"
 fi
 
+# Free port 8000 from any stale server. A crash or an incomplete shutdown can
+# leave an old uvicorn process alive still holding the port, so a fresh run
+# would fail to bind and keep serving the OLD code. Kill any lingering
+# listener first so every restart runs the freshly pulled code.
+echo "→ Checking for a previous server on port 8000..."
+STALE_PIDS="$(lsof -ti:8000 2>/dev/null || true)"
+if [ -n "$STALE_PIDS" ]; then
+    echo "  Stopping stale server (PID $STALE_PIDS)..."
+    # shellcheck disable=SC2086
+    kill $STALE_PIDS 2>/dev/null || true
+    sleep 1
+    STILL="$(lsof -ti:8000 2>/dev/null || true)"
+    if [ -n "$STILL" ]; then
+        # shellcheck disable=SC2086
+        kill -9 $STILL 2>/dev/null || true
+        sleep 1
+    fi
+fi
+
 echo ""
 echo "→ Starting server..."
 echo "  Open http://localhost:8000 in your browser"
