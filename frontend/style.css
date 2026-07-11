@@ -450,7 +450,7 @@ main {
 }
 .check-row {
     display: grid;
-    grid-template-columns: auto 4.5rem 1fr;
+    grid-template-columns: auto 4.5rem 1fr auto;
     gap: 0.6rem;
     align-items: baseline;
     padding: 0.25rem 0.4rem;
@@ -458,6 +458,15 @@ main {
     font-family: var(--font-mono);
     font-size: 0.78rem;
     line-height: 1.35;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+}
+.check-row:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+.check-row:focus-visible {
+    outline: 2px solid rgba(120, 160, 200, 0.6);
+    outline-offset: -2px;
 }
 .check-row.check-halt {
     background: rgba(230, 60, 60, 0.06);
@@ -472,6 +481,23 @@ main {
     border-left: 2px solid rgba(120, 160, 200, 0.3);
     color: var(--text-dim);
 }
+/* Manual review overrides — clicking a check cycles ok → flag → clear.
+   These win over the severity styling above so the reviewed state is obvious. */
+.check-row.check-review-ok {
+    background: rgba(60, 200, 120, 0.10);
+    border-left: 2px solid #3cc878;
+}
+.check-row.check-review-flag {
+    background: rgba(230, 60, 60, 0.12);
+    border-left: 2px solid #e33c3c;
+}
+.check-review-mark {
+    font-weight: 700;
+    min-width: 1rem;
+    text-align: center;
+}
+.check-review-ok .check-review-mark { color: #7fdc9e; }
+.check-review-flag .check-review-mark { color: #e77070; }
 .check-code {
     color: var(--text);
     font-weight: 600;
@@ -734,6 +760,29 @@ main {
     letter-spacing: 0.08em;
     color: var(--text-dim);
     opacity: 0.7;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+.block-label-toggle {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text-dim);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.12rem 0.45rem;
+    cursor: pointer;
+    opacity: 1;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.block-label-toggle:hover {
+    background: rgba(255, 255, 255, 0.09);
+    color: var(--text);
+    border-color: var(--accent, rgba(94, 234, 212, 0.5));
 }
 
 .card-block-row {
@@ -1004,6 +1053,31 @@ main {
     background: rgba(94, 234, 212, 0.06);
 }
 .chart-mode-btn.active {
+    color: var(--accent, #5eead4);
+    border-color: var(--accent, #5eead4);
+    background: rgba(94, 234, 212, 0.08);
+}
+/* Grouping toggle shares the mode-button look. */
+.chart-group-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: var(--radius-sm, 6px);
+    padding: 0.15rem 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    cursor: pointer;
+    line-height: 1;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.chart-group-btn:hover {
+    color: var(--text);
+    border-color: var(--accent, #5eead4);
+    background: rgba(94, 234, 212, 0.06);
+}
+.chart-group-btn.active {
     color: var(--accent, #5eead4);
     border-color: var(--accent, #5eead4);
     background: rgba(94, 234, 212, 0.08);

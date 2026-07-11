@@ -7,6 +7,9 @@ const API = window.location.origin;
 let currentResultId = null;
 let currentData = null;              // last upload's full response
 let uploadedSubjects = [];           // [{ result_id, filename }]
+// Per-block card label mode: 'refresh' → "60 Hz block" (default when
+// demographics are known), 'block' → "Block 1/2" for validity checking.
+let powerBlockLabelMode = 'refresh';
 
 const SUBJECT_COLORS = [
     '#5eead4', '#f472b6', '#818cf8', '#fb923c', '#a3e635',
@@ -412,6 +415,30 @@ function fmtPct(x) { return Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : '�
 // ── Validity checks panel ──
 let checksShowInfo = false;
 
+// Manual review annotations for validity checks. Clicking a check cycles its
+// state (default → ok → flag → default). Persisted in localStorage keyed by
+// subject + check code so it survives reloads and subject switches.
+const CHECKS_REVIEW_KEY = 'eeg.checksReview.v1';
+function loadChecksReview() {
+    try { return JSON.parse(localStorage.getItem(CHECKS_REVIEW_KEY)) || {}; }
+    catch (_) { return {}; }
+}
+function saveChecksReview(state) {
+    try { localStorage.setItem(CHECKS_REVIEW_KEY, JSON.stringify(state)); }
+    catch (_) { /* storage full / disabled — degrade to session-only */ }
+}
+let checksReview = loadChecksReview();
+
+function reviewKey(code) {
+    return `${currentResultId || '_'}::${code}`;
+}
+function cycleReviewState(current) {
+    // default (undefined) → ok → flag → default
+    if (!current) return 'ok';
+    if (current === 'ok') return 'flag';
+    return null;
+}
+
 function renderChecksPanel(checks) {
     const panel = document.getElementById('checks-panel');
     if (!panel) return;
@@ -448,12 +475,34 @@ function renderChecksPanel(checks) {
     }
     list.innerHTML = visible.map(c => {
         const cls = c.level.toLowerCase();
-        return `<div class="check-row check-${cls}">
+        const review = checksReview[reviewKey(c.code)];
+        const reviewCls = review ? ` check-review-${review}` : '';
+        const mark = review === 'ok' ? '✓' : review === 'flag' ? '✕' : '';
+        return `<div class="check-row check-${cls}${reviewCls}" data-code="${escapeHtml(c.code)}"
+                     role="button" tabindex="0"
+                     title="Click to mark reviewed (✓ ok → ✕ flagged → clear)">
             <span class="pill ${cls}">${c.level}</span>
             <span class="check-code">${escapeHtml(c.code)}</span>
             <span class="check-message">${escapeHtml(c.message)}</span>
+            <span class="check-review-mark">${mark}</span>
         </div>`;
     }).join('');
+
+    // Wire click / keyboard cycling of the manual review state.
+    list.querySelectorAll('.check-row').forEach(row => {
+        const code = row.dataset.code;
+        const cycle = () => {
+            const key = reviewKey(code);
+            const next = cycleReviewState(checksReview[key]);
+            if (next) checksReview[key] = next; else delete checksReview[key];
+            saveChecksReview(checksReview);
+            renderChecksPanel(checks);
+        };
+        row.addEventListener('click', cycle);
+        row.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); cycle(); }
+        });
+    });
 }
 
 // Fetch and render the current subject's alignment (if any behavioural
@@ -544,6 +593,7 @@ function showResults(data) {
     currentResultId = data.result_id;
     currentData = data;
     const s = data.summary;
+    saveSession({ view: 'individual', subjectId: data.result_id });
 
     document.getElementById('upload-section').hidden = true;
     document.getElementById('results-section').hidden = false;
@@ -603,6 +653,8 @@ function showResults(data) {
     const condPerTrial = data.trials.map(t => t.cond);
     const fzExcludeArr = data.trials.map(t => t.fz_exclude);
     const c3ExcludeArr = data.trials.map(t => t.c3_exclude);
+    const blockPerTrial = data.trials.map(t => t.block);
+    const specBlockOrder = (s.demographics && s.demographics.block_order) || {};
 
     renderSpectrumChart('chart-spec-theta', {
         freqs: data.spectra.freqs,
@@ -612,6 +664,8 @@ function showResults(data) {
         perTrial: data.spectra.theta_per_trial,
         exclusionFlags: fzExcludeArr,
         condPerTrial,
+        blockPerTrial,
+        blockOrder: specBlockOrder,
     }, 'Wavelet power (µV²)', s.config.theta_band);
     renderSpectrumChart('chart-spec-beta', {
         freqs: data.spectra.freqs,
@@ -621,13 +675,16 @@ function showResults(data) {
         perTrial: data.spectra.beta_per_trial,
         exclusionFlags: c3ExcludeArr,
         condPerTrial,
+        blockPerTrial,
+        blockOrder: specBlockOrder,
     }, 'Wavelet power (µV²)', s.config.beta_band);
     const blockOrder = (s.demographics && s.demographics.block_order) || {};
     renderPerTrialChart('chart-trials-theta', data.trials, 'theta_rel', 'fz_exclude', 'Trial θ relative power', blockOrder);
     renderPerTrialChart('chart-trials-beta',  data.trials, 'beta_rel',  'c3_exclude', 'Trial β relative power', blockOrder);
     renderExclusionChart('chart-exclusion', data.trials, s.theta.channel, s.beta.channel);
 
-    // Excluded trials table
+    // Included + excluded trials tables
+    populateIncludedTable(data.trials, blockOrder);
     populateExcludedTable(data.trials);
 
     // Track this subject
@@ -718,15 +775,26 @@ function setCard(prefix, band, demographics) {
         return;
     }
     const blockOrder = (demographics && demographics.block_order) || {};
+    const hasRefresh = blockKeys.some(k => blockOrder[k]);
+    // Label mode: 'refresh' shows "60 Hz block" (default when demographics known),
+    // 'block' shows "Block 1/2" for validity checking. Toggle lives in the header.
+    const mode = hasRefresh ? powerBlockLabelMode : 'block';
     const overallMax = Math.max(
         ...blockKeys.flatMap(k => [byBlock[k].rel_median_con, byBlock[k].rel_median_inc]),
         0.001
     );
+    const toggleHtml = hasRefresh
+        ? `<button type="button" class="block-label-toggle" data-prefix="${prefix}"
+                   title="Switch between refresh-rate and block labels">${mode === 'refresh' ? 'View: block' : 'View: refresh rate'}</button>`
+        : '';
     blocksEl.innerHTML = `
-        <div class="card-blocks-header">Per-block breakdown</div>
+        <div class="card-blocks-header">Per-block breakdown ${toggleHtml}</div>
         ${blockKeys.map(k => {
             const b = byBlock[k];
-            const label = blockOrder[k] ? `Block ${k} · ${escapeHtml(blockOrder[k])}` : `Block ${k}`;
+            const hz = blockOrder[k];
+            const label = (mode === 'refresh' && hz)
+                ? `${escapeHtml(hz)} block`
+                : (hz ? `Block ${k} · ${escapeHtml(hz)}` : `Block ${k}`);
             const nSurv = b.n_surv_con + b.n_surv_inc;
             const nTot = b.n_total_con + b.n_total_inc;
             const cWidth = (b.rel_median_con / overallMax) * 50;
@@ -758,6 +826,20 @@ function setCard(prefix, band, demographics) {
             `;
         }).join('')}
     `;
+
+    // Wire the refresh-rate / block label toggle (re-renders both cards so
+    // theta and beta stay in sync).
+    const toggleBtn = blocksEl.querySelector('.block-label-toggle');
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => {
+            powerBlockLabelMode = powerBlockLabelMode === 'refresh' ? 'block' : 'refresh';
+            const s = currentData && currentData.summary;
+            if (s) {
+                setCard('theta', s.theta, s.demographics);
+                setCard('beta', s.beta, s.demographics);
+            }
+        });
+    }
 }
 
 // ── Wavelet spectrum chart ──
@@ -770,19 +852,99 @@ function renderSpectrumChart(containerId, spectrumData, yLabel, bandRange) {
     // Default mode: whatever the panel had before, else 'avg'
     const panel = el.closest('.chart-panel');
     const currentMode = (panel && panel.dataset.mode) || 'avg';
-    drawSpectrumChart(containerId, currentMode);
+    const currentGroup = (panel && panel.dataset.group) || 'condition';
+    drawSpectrumChart(containerId, currentMode, currentGroup);
+    updateSpectrumGroupToggle(containerId);
 }
 
-function drawSpectrumChart(containerId, mode) {
+// Show/hide the Condition↔Refresh grouping toggle for a spectrum panel based
+// on whether the loaded data actually has refresh-rate block info.
+function updateSpectrumGroupToggle(containerId) {
+    const el = document.getElementById(containerId);
+    const panel = el && el.closest('.chart-panel');
+    if (!panel) return;
+    const gToggle = panel.querySelector('.chart-group-btn');
+    if (!gToggle) return;
+    const spec = el.__spectrum;
+    const canRefresh = spec && spec.blockPerTrial && spec.blockPerTrial.length &&
+        spec.blockOrder && Object.keys(spec.blockOrder).length > 0;
+    gToggle.hidden = !canRefresh;
+    if (!canRefresh && panel.dataset.group === 'refresh') {
+        panel.dataset.group = 'condition';
+    }
+}
+
+function drawSpectrumChart(containerId, mode, group) {
     const el = document.getElementById(containerId);
     const data = el.__spectrum;
     if (!data) return;
     const { freqs, conData, incData, excData,
             perTrial, exclusionFlags, condPerTrial,
+            blockPerTrial, blockOrder,
             yLabel, bandRange } = data;
 
+    // Resolve grouping: 'condition' (con/inc, default) or 'refresh' (per block,
+    // labelled by refresh rate). Fall back to condition if we lack block data.
+    const panel = el.closest('.chart-panel');
+    const canRefresh = blockPerTrial && blockPerTrial.length &&
+        blockOrder && Object.keys(blockOrder).length > 0;
+    const grp = group || (panel && panel.dataset.group) || 'condition';
+    const effGroup = (grp === 'refresh' && canRefresh) ? 'refresh' : 'condition';
+
+    // Average the per-trial spectra rows for the trials matching `pred`.
+    function avgRows(pred) {
+        const rows = [];
+        for (let i = 0; i < perTrial.length; i++) if (pred(i)) rows.push(perTrial[i]);
+        if (!rows.length) return null;
+        const n = rows[0].length;
+        const out = new Array(n).fill(0);
+        for (const r of rows) for (let f = 0; f < n; f++) out[f] += r[f];
+        for (let f = 0; f < n; f++) out[f] /= rows.length;
+        return out;
+    }
+
     const traces = [];
-    if (mode === 'all' && perTrial && perTrial.length) {
+
+    if (effGroup === 'refresh') {
+        // One series per block, coloured, labelled by refresh rate.
+        const blocks = [...new Set(blockPerTrial)].sort((a, b) => a - b);
+        const BLOCK_COLORS = [CON_COLOR, INC_COLOR, '#818cf8', '#fbbf24'];
+        const BLOCK_FILLS = [CON_COLOR_DIM, INC_COLOR_DIM,
+                             'rgba(129,140,248,0.15)', 'rgba(251,191,36,0.15)'];
+        blocks.forEach((blk, bi) => {
+            const color = BLOCK_COLORS[bi % BLOCK_COLORS.length];
+            const hz = blockOrder[String(blk)];
+            const name = hz ? `${hz} block` : `Block ${blk}`;
+            if (mode === 'all') {
+                // Every surviving trial in this block, dimmed.
+                let sawLegend = false;
+                for (let i = 0; i < perTrial.length; i++) {
+                    if (exclusionFlags[i] || blockPerTrial[i] !== blk) continue;
+                    traces.push({
+                        x: freqs, y: perTrial[i],
+                        type: 'scatter', mode: 'lines',
+                        line: { color, width: 1 }, opacity: 0.18,
+                        name, legendgroup: `blk${blk}`, showlegend: !sawLegend,
+                        hovertemplate: `<b>${name}</b> · trial ${i + 1}<br>%{x:.1f} Hz → %{y:.2f}<extra></extra>`,
+                    });
+                    sawLegend = true;
+                }
+                const avg = avgRows(i => !exclusionFlags[i] && blockPerTrial[i] === blk);
+                if (avg) traces.push({
+                    x: freqs, y: avg, name: `${name} · avg`, legendgroup: `blk${blk}-avg`,
+                    type: 'scatter', mode: 'lines', line: { color, width: 2.2 },
+                });
+            } else {
+                const avg = avgRows(i => !exclusionFlags[i] && blockPerTrial[i] === blk);
+                if (avg) traces.push({
+                    x: freqs, y: avg, name,
+                    type: 'scatter', mode: 'lines',
+                    line: { color, width: 1.6 },
+                    fill: 'tozeroy', fillcolor: BLOCK_FILLS[bi % BLOCK_FILLS.length],
+                });
+            }
+        });
+    } else if (mode === 'all' && perTrial && perTrial.length) {
         // Excluded first (dimmed, behind)
         for (let i = 0; i < perTrial.length; i++) {
             if (!exclusionFlags[i]) continue;
@@ -977,6 +1139,47 @@ function renderExclusionChart(containerId, trials, ch1Label, ch2Label) {
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
 }
 
+// ── Included trials table ──
+// Mirror of the excluded table for trials that survived on BOTH channels.
+// The block column shows the refresh-rate label (e.g. "60 Hz") when known.
+function populateIncludedTable(trials, blockOrder = {}) {
+    const included = trials.filter(t => !t.fz_exclude && !t.c3_exclude);
+    const section = document.getElementById('included-section');
+    const countEl = document.getElementById('included-count');
+    const tbody = document.querySelector('#included-table tbody');
+    if (!section || !tbody) return;
+
+    if (included.length === 0) {
+        section.hidden = true;
+        return;
+    }
+    section.hidden = false;
+    countEl.textContent = `(${included.length})`;
+
+    tbody.innerHTML = included.map(t => {
+        const mm = Math.floor(t.onset / 60);
+        const ss = (t.onset - mm * 60).toFixed(2).padStart(5, '0');
+        const onsetLabel = `${mm}:${ss}`;
+        const onsetRaw = t.onset.toFixed(4);
+        const hz = blockOrder[String(t.block)];
+        const blockLabel = hz ? `${t.block} · ${escapeHtml(hz)}` : `${t.block}`;
+        return `
+        <tr>
+            <td>${t.trial}</td>
+            <td>${blockLabel}</td>
+            <td title="Raw seconds from LabChart file: ${onsetRaw}"><span class="onset-mm">${onsetLabel}</span><span class="onset-raw">${onsetRaw}s</span></td>
+            <td>${t.condition}</td>
+            <td>${t.rt_ms} ms</td>
+            <td>${t.fz_ptp.toFixed(1)} µV</td>
+            <td>${t.theta_rel.toFixed(3)}</td>
+            <td>${t.beta_rel.toFixed(3)}</td>
+            <td>${t.maxz.toFixed(2)}</td>
+            <td>${t.impact.toFixed(1)}%</td>
+            <td>${t.coinc.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+}
+
 // ── Excluded trials table ──
 function populateExcludedTable(trials) {
     const excluded = trials.filter(t => t.fz_exclude || t.c3_exclude);
@@ -1113,6 +1316,8 @@ async function showComparison() {
 
         document.getElementById('results-section').hidden = true;
         document.getElementById('compare-section').hidden = false;
+        document.getElementById('upload-section').hidden = true;
+        saveSession({ view: 'compare' });
 
         // Table
         const thead = document.querySelector('#compare-table thead');
@@ -1263,6 +1468,62 @@ function goToUpload() {
     document.getElementById('file-input').value = '';
 }
 
+// ── Session persistence ──
+// The backend keeps parsed results in memory (until it restarts), so on a page
+// refresh we can re-fetch the still-available subjects and restore the view the
+// analyst was last on — no re-upload needed. We only persist lightweight view
+// state (which subjects, which one was open); the heavy data comes from the API.
+const SESSION_KEY = 'eeg.session.v1';
+function saveSession(patch) {
+    let cur = {};
+    try { cur = JSON.parse(localStorage.getItem(SESSION_KEY)) || {}; } catch (_) {}
+    const next = { ...cur, ...patch };
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(next)); } catch (_) {}
+}
+function clearSession() {
+    try { localStorage.removeItem(SESSION_KEY); } catch (_) {}
+}
+function readSession() {
+    try { return JSON.parse(localStorage.getItem(SESSION_KEY)) || {}; }
+    catch (_) { return {}; }
+}
+
+async function restoreSession() {
+    let subjects;
+    try {
+        const resp = await fetch(`${API}/api/subjects`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        subjects = data.subjects || [];
+    } catch (_) {
+        return;  // backend unreachable — stay on the upload screen
+    }
+    if (!subjects.length) {
+        clearSession();
+        return;
+    }
+
+    // Rebuild the in-memory subject list from what the backend still holds.
+    uploadedSubjects = subjects.map(s => ({
+        result_id: s.result_id,
+        filename: s.filename,
+    }));
+
+    const sess = readSession();
+    const stillHere = id => uploadedSubjects.some(s => s.result_id === id);
+
+    if (sess.view === 'compare' && uploadedSubjects.length >= 2) {
+        updateCompareButton();
+        showComparison();
+        return;
+    }
+    // Individual view: prefer the last-open subject, else the first available.
+    const target = (sess.subjectId && stillHere(sess.subjectId))
+        ? sess.subjectId
+        : uploadedSubjects[0].result_id;
+    await loadSubject(target);
+}
+
 // ── Buttons ──
 function initActions() {
     document.getElementById('btn-download').addEventListener('click', () => {
@@ -1284,6 +1545,7 @@ function initActions() {
         uploadedSubjects = [];
         currentResultId = null;
         currentData = null;
+        clearSession();
         goToUpload();
     });
 
@@ -1316,6 +1578,9 @@ document.addEventListener('DOMContentLoaded', () => {
     initUpload();
     initActions();
     initChartExpand();
+    // Restore a previous session from backend memory (survives page refresh
+    // as long as the server hasn't restarted).
+    restoreSession();
 });
 
 // ── Chart expand / collapse ──
@@ -1423,6 +1688,31 @@ function enhanceChartPanels() {
                 drawSpectrumChart(container.id, panel.dataset.mode);
             });
             actions.appendChild(toggle);
+        }
+
+        // Grouping toggle (Condition ↔ Refresh rate) — only for spectrum panels.
+        // Created unconditionally (like the mode button); its visibility is
+        // managed by updateSpectrumGroupToggles() once data is loaded.
+        if (isSpectrum && !actions.querySelector('.chart-group-btn')) {
+            panel.dataset.group = panel.dataset.group || 'condition';
+            const gToggle = document.createElement('button');
+            gToggle.className = 'chart-group-btn';
+            gToggle.type = 'button';
+            gToggle.hidden = true;  // shown when refresh-rate data is available
+            const paintGroup = () => {
+                const isRefresh = panel.dataset.group === 'refresh';
+                gToggle.textContent = isRefresh ? 'Group: refresh rate' : 'Group: condition';
+                gToggle.classList.toggle('active', isRefresh);
+            };
+            paintGroup();
+            gToggle.title = 'Group spectra by congruency or by refresh-rate block';
+            gToggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                panel.dataset.group = panel.dataset.group === 'refresh' ? 'condition' : 'refresh';
+                paintGroup();
+                drawSpectrumChart(container.id, panel.dataset.mode, panel.dataset.group);
+            });
+            actions.appendChild(gToggle);
         }
 
         // Expand button on every panel
