@@ -2057,3 +2057,65 @@ footer p {
 .rw-line { width: 14px; height: 0; border-top: 2px solid; display: inline-block; }
 .rw-con  { border-color: #059669; }
 .rw-inc  { border-color: #dc2626; }
+
+/* Accuracy panel (Doc 6) — behavioural correctness + incorrect-trial drops */
+.accuracy-panel .demo-icon { color: var(--accent, #5eead4); }
+.accuracy-body {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 0.7rem;
+}
+.acc-card {
+    background: var(--bg, rgba(255,255,255,0.02));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md, 8px);
+    padding: 0.7rem 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.acc-card-overall {
+    border-color: var(--accent, #5eead4);
+    background: rgba(94,234,212,0.06);
+}
+.acc-card-head {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    justify-content: space-between;
+}
+.acc-figure {
+    font-family: var(--font-mono);
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1;
+}
+.acc-detail {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    line-height: 1.45;
+}
+.acc-cond { opacity: 0.85; }
+.acc-err {
+    color: #f87171;
+    font-weight: 600;
+}
+.acc-ok {
+    color: #34d399;
+    font-weight: 600;
+}
+.accuracy-note {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin: 0.8rem 0 0;
+    opacity: 0.8;
+}

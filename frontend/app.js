@@ -522,7 +522,7 @@ function renderAlignmentPanel(alignment, accuracy) {
         const accLine = acc
             ? `<span>accuracy <b>${fmtPct(acc.accuracy)}</b>${acc.n_errors ? ` · <b>${acc.n_errors}</b> error${acc.n_errors > 1 ? 's' : ''}` : ''}${
                 acc.eeg_error_trials_dropped.theta || acc.eeg_error_trials_dropped.beta
-                    ? ` · would drop θ <b>${acc.eeg_error_trials_dropped.theta}</b> / β <b>${acc.eeg_error_trials_dropped.beta}</b> from surviving`
+                    ? ` · excluded θ <b>${acc.eeg_error_trials_dropped.theta}</b> / β <b>${acc.eeg_error_trials_dropped.beta}</b> (incorrect response)`
                     : ''
               }</span>`
             : '';
@@ -537,6 +537,57 @@ function renderAlignmentPanel(alignment, accuracy) {
         </div>`;
     }).join('');
 }
+
+// Behavioural accuracy box (Doc 6). Renders per-block + overall accuracy and
+// how many EEG trials were excluded for an incorrect response. Hidden when no
+// behavioural data is aligned.
+function renderAccuracyPanel(accuracy) {
+    const panel = document.getElementById('accuracy-panel');
+    if (!panel) return;
+    if (!accuracy || !accuracy.length) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+
+    const totBeh = accuracy.reduce((s, a) => s + (a.n_beh_trials || 0), 0);
+    const totErr = accuracy.reduce((s, a) => s + (a.n_errors || 0), 0);
+    const overall = totBeh ? (totBeh - totErr) / totBeh : NaN;
+    const totDropTheta = accuracy.reduce((s, a) => s + (a.eeg_error_trials_dropped?.theta || 0), 0);
+    const totDropBeta = accuracy.reduce((s, a) => s + (a.eeg_error_trials_dropped?.beta || 0), 0);
+
+    const summary = document.getElementById('accuracy-summary');
+    if (summary) {
+        summary.textContent = `overall ${fmtPct(overall)} · ${totErr} incorrect trial${totErr === 1 ? '' : 's'} excluded`;
+    }
+
+    const body = document.getElementById('accuracy-body');
+    const cards = accuracy.map(a => {
+        const dropped = (a.eeg_error_trials_dropped?.theta || 0);
+        const errBadge = a.n_errors
+            ? `<span class="acc-err">${a.n_errors} incorrect</span>`
+            : `<span class="acc-ok">no errors</span>`;
+        return `<div class="acc-card">
+            <div class="acc-card-head">Block ${a.block} ${errBadge}</div>
+            <div class="acc-figure">${fmtPct(a.accuracy)}</div>
+            <div class="acc-detail">
+                ${a.n_beh_trials} trials · ${a.n_beh_trials - a.n_errors} correct
+                ${a.n_errors ? `<br>excluded ${dropped} EEG epoch${dropped === 1 ? '' : 's'} (incorrect response)` : ''}
+                ${(a.matched_error_con || a.matched_error_inc)
+                    ? `<br><span class="acc-cond">errors: ${a.matched_error_con} congruent · ${a.matched_error_inc} incongruent</span>`
+                    : ''}
+            </div>
+        </div>`;
+    }).join('');
+    const overallCard = `<div class="acc-card acc-card-overall">
+        <div class="acc-card-head">Overall</div>
+        <div class="acc-figure">${fmtPct(overall)}</div>
+        <div class="acc-detail">${totBeh} trials · ${totErr} incorrect<br>
+            excluded θ ${totDropTheta} / β ${totDropBeta} epoch${(totDropTheta === 1 && totDropBeta === 1) ? '' : 's'}</div>
+    </div>`;
+    body.innerHTML = overallCard + cards;
+}
+
 
 // Apply the docs/DATA_VALIDITY_CHECKING.md §7 J-code gates and return a
 // UI-friendly severity + label + detail message.
@@ -671,6 +722,7 @@ async function refreshAlignmentForCurrentSubject() {
         if (!resp.ok) return;
         const d = await resp.json();
         renderAlignmentPanel(d.alignment, d.accuracy);
+        renderAccuracyPanel(d.accuracy);
         renderChecksPanel(d.checks);
     } catch (_) { /* backend unreachable — leave panel hidden */ }
 }
@@ -736,6 +788,7 @@ function initBehaviouralUpload() {
                 // subject, refresh the alignment panel immediately.
                 if (currentResultId && data.subject_id === currentResultId) {
                     renderAlignmentPanel(data.alignment, data.accuracy);
+                    renderAccuracyPanel(data.accuracy);
                     renderChecksPanel(data.checks);
                     // Trial numbering now uses flanker task numbers and the
                     // missing-trials box may have populated — reload the full
@@ -808,6 +861,7 @@ function showResults(data) {
     // aligned to this subject's EEG). The upload endpoint returns alignment
     // on demand; results endpoint doesn't yet include it, so we pull it.
     renderAlignmentPanel(data.alignment, data.accuracy);
+    renderAccuracyPanel(data.accuracy);
     refreshAlignmentForCurrentSubject();
 
     // Validity checks (always emitted by the backend when EEG is loaded)

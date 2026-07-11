@@ -167,6 +167,24 @@
                 <div class="checks-list" id="checks-list"></div>
             </div>
 
+            <!-- Behavioural accuracy panel (only when behavioural CSV aligned) -->
+            <div class="demographics-panel accuracy-panel" id="accuracy-panel" hidden>
+                <div class="demo-header">
+                    <span class="demo-title">
+                        <span class="demo-icon">◎</span>
+                        Response accuracy
+                    </span>
+                    <span class="demo-subject" id="accuracy-summary">—</span>
+                </div>
+                <div class="accuracy-body" id="accuracy-body"></div>
+                <p class="accuracy-note">
+                    Incorrectly-answered trials are excluded from all analyses
+                    (theta, beta, and reaction time) and appear in the Excluded
+                    list with the reason “incorrect flanker response”. Reaction
+                    time is the primary measure; accuracy is shown for completeness.
+                </p>
+            </div>
+
             <!-- Power Summary Cards -->
             <div class="power-cards">
                 <div class="power-card theta">
