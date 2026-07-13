@@ -11,6 +11,11 @@ let stagedFiles = [];                // File[] waiting to be analysed
 // Per-block card label mode: 'refresh' → "60 Hz block" (default when
 // demographics are known), 'block' → "Block 1/2" for validity checking.
 let powerBlockLabelMode = 'refresh';
+// Individual-view measure toggle (spec §2): 'power' shows relative spectral
+// power (the analysis measure), 'amplitude' shows band-filtered amplitude in
+// µV (a within-participant descriptive; never a group/CSV measure). Affects
+// only the individual view's displayed content; layout is unchanged.
+let powerMeasureMode = 'power';
 
 const SUBJECT_COLORS = [
     '#5eead4', '#f472b6', '#818cf8', '#fb923c', '#a3e635',
@@ -949,6 +954,9 @@ function showResults(data) {
     setCard('theta', s.theta, s.demographics);
     // Beta card
     setCard('beta', s.beta, s.demographics);
+    // Show the power↔amplitude measure toggle only when amplitude data is
+    // present (individual endpoints only) and update the labels for the mode.
+    updatePowerMeasureToggle(s);
 
     // Charts
     // Precompute per-trial condition + exclusion arrays (aligned to spectra rows)
@@ -1047,19 +1055,35 @@ function setCard(prefix, band, demographics) {
     const oldNotice = card && card.querySelector('.channel-excluded-notice');
     if (oldNotice) oldNotice.remove();
 
-    const relCon = band.rel_median_con ?? 0;
-    const relInc = band.rel_median_inc ?? 0;
+    // Measure mode (spec §2). 'power' → relative spectral power (analysis
+    // measure), with absolute power as the secondary line. 'amplitude' →
+    // band-filtered amplitude in µV (individual-view descriptive only); the
+    // secondary abs line is suppressed since µV is already the headline value.
+    // Amplitude fields are only present on the individual endpoints; fall back
+    // to power if they're absent so the group/compare view never breaks.
+    const amp = powerMeasureMode === 'amplitude' && band.amp_median_con != null;
+    const mainCon = amp ? (band.amp_median_con ?? 0) : (band.rel_median_con ?? 0);
+    const mainInc = amp ? (band.amp_median_inc ?? 0) : (band.rel_median_inc ?? 0);
     const absCon = band.abs_median_con ?? 0;
     const absInc = band.abs_median_inc ?? 0;
 
-    document.getElementById(`${prefix}-rel-con`).textContent = relCon.toFixed(3);
-    document.getElementById(`${prefix}-rel-inc`).textContent = relInc.toFixed(3);
-    document.getElementById(`${prefix}-abs-con`).textContent = `abs ${absCon.toFixed(2)}`;
-    document.getElementById(`${prefix}-abs-inc`).textContent = `abs ${absInc.toFixed(2)}`;
+    document.getElementById(`${prefix}-rel-con`).textContent =
+        amp ? `${mainCon.toFixed(2)} µV` : mainCon.toFixed(3);
+    document.getElementById(`${prefix}-rel-inc`).textContent =
+        amp ? `${mainInc.toFixed(2)} µV` : mainInc.toFixed(3);
+    const secCon = document.getElementById(`${prefix}-abs-con`);
+    const secInc = document.getElementById(`${prefix}-abs-inc`);
+    if (amp) {
+        secCon.textContent = '';
+        secInc.textContent = '';
+    } else {
+        secCon.textContent = `abs ${absCon.toFixed(2)}`;
+        secInc.textContent = `abs ${absInc.toFixed(2)}`;
+    }
 
-    const relMax = Math.max(relCon, relInc, 0.001);
-    document.getElementById(`${prefix}-bar-con`).style.width = `${(relCon / relMax) * 50}%`;
-    document.getElementById(`${prefix}-bar-inc`).style.width = `${(relInc / relMax) * 50}%`;
+    const relMax = Math.max(mainCon, mainInc, 0.001);
+    document.getElementById(`${prefix}-bar-con`).style.width = `${(mainCon / relMax) * 50}%`;
+    document.getElementById(`${prefix}-bar-inc`).style.width = `${(mainInc / relMax) * 50}%`;
 
     document.getElementById(`${prefix}-survival`).textContent =
         `${band.surviving}/${band.surviving + band.excluded} surviving · ` +
@@ -1082,8 +1106,10 @@ function setCard(prefix, band, demographics) {
     // Label mode: 'refresh' shows "60 Hz block" (default when demographics known),
     // 'block' shows "Block 1/2" for validity checking. Toggle lives in the header.
     const mode = hasRefresh ? powerBlockLabelMode : 'block';
+    const blkMainCon = k => amp ? (byBlock[k].amp_median_con ?? 0) : byBlock[k].rel_median_con;
+    const blkMainInc = k => amp ? (byBlock[k].amp_median_inc ?? 0) : byBlock[k].rel_median_inc;
     const overallMax = Math.max(
-        ...blockKeys.flatMap(k => [byBlock[k].rel_median_con, byBlock[k].rel_median_inc]),
+        ...blockKeys.flatMap(k => [blkMainCon(k), blkMainInc(k)]),
         0.001
     );
     const toggleHtml = hasRefresh
@@ -1100,22 +1126,28 @@ function setCard(prefix, band, demographics) {
                 : (hz ? `Block ${k} · ${escapeHtml(hz)}` : `Block ${k}`);
             const nSurv = b.n_surv_con + b.n_surv_inc;
             const nTot = b.n_total_con + b.n_total_inc;
-            const cWidth = (b.rel_median_con / overallMax) * 50;
-            const iWidth = (b.rel_median_inc / overallMax) * 50;
+            const conMain = blkMainCon(k);
+            const incMain = blkMainInc(k);
+            const cWidth = (conMain / overallMax) * 50;
+            const iWidth = (incMain / overallMax) * 50;
+            const conMainStr = amp ? `${conMain.toFixed(2)} µV` : conMain.toFixed(3);
+            const incMainStr = amp ? `${incMain.toFixed(2)} µV` : incMain.toFixed(3);
+            const conSec = amp ? '' : `abs ${b.abs_median_con.toFixed(2)}`;
+            const incSec = amp ? '' : `abs ${b.abs_median_inc.toFixed(2)}`;
             return `
                 <div class="card-block-row">
                     <div class="card-block-label">${label}</div>
                     <div class="card-block-values">
                         <div class="val-group congruent">
                             <span class="val-label">Con</span>
-                            <span class="val-number">${b.rel_median_con.toFixed(3)}</span>
-                            <span class="val-secondary">abs ${b.abs_median_con.toFixed(2)}</span>
+                            <span class="val-number">${conMainStr}</span>
+                            <span class="val-secondary">${conSec}</span>
                         </div>
                         <div class="val-divider"></div>
                         <div class="val-group incongruent">
                             <span class="val-label">Inc</span>
-                            <span class="val-number">${b.rel_median_inc.toFixed(3)}</span>
-                            <span class="val-secondary">abs ${b.abs_median_inc.toFixed(2)}</span>
+                            <span class="val-number">${incMainStr}</span>
+                            <span class="val-secondary">${incSec}</span>
                         </div>
                     </div>
                     <div class="card-block-bar">
@@ -1145,7 +1177,66 @@ function setCard(prefix, band, demographics) {
     }
 }
 
-// ── Wavelet spectrum chart ──
+// Show/update the individual-view power↔amplitude measure toggle (spec §2).
+// The toggle is revealed only when amplitude data is present (individual
+// endpoints); it stays hidden on any payload without amplitude so the group
+// view is unaffected. Also updates the two card band-labels and the note to
+// reflect the active measure.
+function updatePowerMeasureToggle(summary) {
+    const toggle = document.getElementById('power-measure-toggle');
+    if (!toggle) return;
+    const hasAmp = !!(summary && (
+        (summary.theta && summary.theta.amp_median_con != null) ||
+        (summary.beta && summary.beta.amp_median_con != null)
+    ));
+    toggle.hidden = !hasAmp;
+    if (!hasAmp) {
+        // No amplitude for this payload — force power mode so nothing shows µV.
+        powerMeasureMode = 'power';
+    }
+    // Reflect active button state.
+    const btnPower = document.getElementById('measure-power');
+    const btnAmp = document.getElementById('measure-amplitude');
+    if (btnPower && btnAmp) {
+        btnPower.classList.toggle('active', powerMeasureMode === 'power');
+        btnAmp.classList.toggle('active', powerMeasureMode === 'amplitude');
+    }
+    // Card band-labels: describe the measure being shown.
+    const thetaLabel = document.getElementById('theta-band-label');
+    const betaLabel = document.getElementById('beta-band-label');
+    if (powerMeasureMode === 'amplitude') {
+        if (thetaLabel) thetaLabel.textContent = 'θ Theta · band amplitude (µV)';
+        if (betaLabel) betaLabel.textContent = 'β Beta · band amplitude (µV)';
+    } else {
+        if (thetaLabel) thetaLabel.textContent = 'θ Theta · relative power';
+        if (betaLabel) betaLabel.textContent = 'β Beta · relative power';
+    }
+    const note = document.getElementById('power-measure-note');
+    if (note) {
+        note.textContent = powerMeasureMode === 'amplitude'
+            ? 'Band-filtered RMS amplitude (θ at Fz-Pz, β at C3-C4) over the analysis window. Within-participant only — not a cross-participant measure.'
+            : '';
+    }
+}
+
+// Wire the power↔amplitude toggle buttons (called once from initActions).
+function initPowerMeasureToggle() {
+    const btnPower = document.getElementById('measure-power');
+    const btnAmp = document.getElementById('measure-amplitude');
+    if (!btnPower || !btnAmp) return;
+    const apply = (mode) => {
+        if (powerMeasureMode === mode) return;
+        powerMeasureMode = mode;
+        const s = currentData && currentData.summary;
+        if (s) {
+            setCard('theta', s.theta, s.demographics);
+            setCard('beta', s.beta, s.demographics);
+            updatePowerMeasureToggle(s);
+        }
+    };
+    btnPower.addEventListener('click', () => apply('power'));
+    btnAmp.addEventListener('click', () => apply('amplitude'));
+}
 // Builds two views (Avg and All-trials) and stores the data on the container
 // so the header toggle can switch between them without a re-fetch.
 function renderSpectrumChart(containerId, spectrumData, yLabel, bandRange) {
@@ -2812,6 +2903,7 @@ async function restoreSession() {
 
 // ── Buttons ──
 function initActions() {
+    initPowerMeasureToggle();
     document.getElementById('btn-download').addEventListener('click', () => {
         if (currentResultId) window.location.href = `${API}/api/download-csv/${currentResultId}`;
     });

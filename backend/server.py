@@ -128,8 +128,16 @@ def _demographic_payload(filename: str) -> dict:
     return payload
 
 
-def _summary_payload(r: PipelineResult) -> dict:
-    """Structured summary for the frontend."""
+def _summary_payload(r: PipelineResult, include_amplitude: bool = False) -> dict:
+    """Structured summary for the frontend.
+
+    ``include_amplitude`` adds band-filtered amplitude (µV) medians to each
+    channel payload. It is passed True ONLY by the individual-participant
+    endpoints (/api/upload, /api/subjects/{id}/results); the group comparison
+    endpoint (/api/compare) leaves it False so amplitude — which is not
+    scale-invariant across participants — never enters any group aggregate or
+    comparison export (spec §2 hard constraint).
+    """
     return {
         "filename": r.filename,
         "recording_date": r.recording_date,
@@ -139,8 +147,8 @@ def _summary_payload(r: PipelineResult) -> dict:
         "n_blocks": r.n_blocks,
         "n_congruent": sum(1 for t in r.trials if t.cond == "con"),
         "n_incongruent": sum(1 for t in r.trials if t.cond == "first"),
-        "theta": _channel_payload(r.theta_summary),
-        "beta":  _channel_payload(r.beta_summary),
+        "theta": _channel_payload(r.theta_summary, include_amplitude),
+        "beta":  _channel_payload(r.beta_summary, include_amplitude),
         "demographics": _demographic_payload(r.filename),
         # Per-recording adaptive thresholds + contamination metrics (Tasks
         # 4/5/8). These are the values THIS recording used, self-calibrated
@@ -170,14 +178,14 @@ def _summary_payload(r: PipelineResult) -> dict:
     }
 
 
-def _channel_payload(s: ChannelSummary) -> dict:
+def _channel_payload(s: ChannelSummary, include_amplitude: bool = False) -> dict:
     # When a channel is scope-excluded (Task 7), its power values must not be
     # reported (acceptance: "no beta power reported"). Survival/exclusion
     # bookkeeping is kept so the reader sees why it was dropped.
     excl = s.channel_excluded
     by_block = {}
     for blk, b in (s.by_block or {}).items():
-        by_block[str(blk)] = {
+        cell = {
             "n_total_con": b["n_total_con"],
             "n_total_inc": b["n_total_inc"],
             "n_surv_con": b["n_surv_con"],
@@ -191,7 +199,13 @@ def _channel_payload(s: ChannelSummary) -> dict:
             "rel_median_con": None if excl else _safe(round(b["rel_median_con"], 4)),
             "rel_median_inc": None if excl else _safe(round(b["rel_median_inc"], 4)),
         }
-    return {
+        # Amplitude (µV) — individual view only. Guarded so it never rides the
+        # shared _summary_payload into /api/compare (spec §2).
+        if include_amplitude:
+            cell["amp_median_con"] = None if excl else _safe(round(b["amp_median_con"], 3))
+            cell["amp_median_inc"] = None if excl else _safe(round(b["amp_median_inc"], 3))
+        by_block[str(blk)] = cell
+    payload = {
         "channel": s.channel,
         "band": s.band,
         "surviving": s.surviving,
@@ -213,6 +227,10 @@ def _channel_payload(s: ChannelSummary) -> dict:
         "exclusion_code": s.exclusion_code,
         "exclusion_reason": s.exclusion_reason,
     }
+    if include_amplitude:
+        payload["amp_median_con"] = None if excl else _safe(round(s.amp_median_con, 3))
+        payload["amp_median_inc"] = None if excl else _safe(round(s.amp_median_inc, 3))
+    return payload
 
 
 def _flanker_context(subject_id: str) -> tuple[dict, List[dict]]:
@@ -1004,7 +1022,7 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
         return {
             "status": "success",
             "result_id": result_id,
-            "summary": _summary_payload(result),
+            "summary": _summary_payload(result, include_amplitude=True),
             "trials": [_trial_row(t, flanker_map) for t in result.trials],
             "missing_trials": missing_trials,
             "spectra": _spectra_payload(result),
@@ -1066,7 +1084,7 @@ async def subject_results(result_id: str):
     return {
         "status": "success",
         "result_id": result_id,
-        "summary": _summary_payload(result),
+        "summary": _summary_payload(result, include_amplitude=True),
         "trials": [_trial_row(t, flanker_map) for t in result.trials],
         "missing_trials": missing_trials,
         "spectra": _spectra_payload(result),

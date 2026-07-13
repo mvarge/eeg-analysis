@@ -1622,6 +1622,26 @@ footer p {
 }
 .refresh-toolbar-check input { cursor: pointer; }
 
+/* Individual-view power↔amplitude measure toggle (spec §2) */
+.power-measure-toggle {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin: 0.4rem 0 0.8rem;
+}
+.power-measure-toggle .pmt-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    font-weight: 600;
+}
+.power-measure-toggle .pmt-note {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    flex: 1 1 100%;
+    line-height: 1.4;
+}
+
 /* Retained trials by target direction (4b) */
 .target-dir-body { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 0.4rem 0 0.6rem; }
 .td-toolbar { flex-basis: 100%; margin-bottom: 0.2rem; }

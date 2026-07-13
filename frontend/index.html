@@ -207,10 +207,18 @@
             </div>
 
             <!-- Power Summary Cards -->
+            <div class="power-measure-toggle" id="power-measure-toggle" hidden>
+                <span class="pmt-label">Individual view:</span>
+                <div class="seg-toggle" role="group" aria-label="Individual measure">
+                    <button type="button" class="seg-btn active" id="measure-power" data-measure="power">Spectral power</button>
+                    <button type="button" class="seg-btn" id="measure-amplitude" data-measure="amplitude">Amplitude (µV)</button>
+                </div>
+                <span class="pmt-note" id="power-measure-note"></span>
+            </div>
             <div class="power-cards">
                 <div class="power-card theta">
                     <div class="card-header">
-                        <span class="band-label">θ Theta · relative power</span>
+                        <span class="band-label" id="theta-band-label">θ Theta · relative power</span>
                         <span class="channel-label" id="ch1-name">Fz-Pz</span>
                     </div>
                     <div class="card-values">
@@ -239,7 +247,7 @@
 
                 <div class="power-card beta">
                     <div class="card-header">
-                        <span class="band-label">β Beta · relative power</span>
+                        <span class="band-label" id="beta-band-label">β Beta · relative power</span>
                         <span class="channel-label" id="ch2-name">C3-C4</span>
                     </div>
                     <div class="card-values">

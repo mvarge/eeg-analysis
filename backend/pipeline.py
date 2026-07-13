@@ -120,6 +120,17 @@ class TrialResult:
     beta_abs: float
     beta_rel: float
 
+    # Band-filtered amplitude (µV) — individual-view only (spec §2). RMS of the
+    # band-pass-filtered signal over the 0..WIN_S analysis window: theta band at
+    # Fz-Pz, beta band at C3-C4. This is a within-participant descriptive, NOT an
+    # analysis measure: amplitude in µV is not scale-invariant the way relative
+    # power is (it carries between-participant recording-scale differences), so
+    # it must never enter any group aggregate, group difference, or comparison
+    # CSV. Kept per trial only so _channel_summary can median it per
+    # (refresh block × congruency) for the individual amplitude view.
+    theta_amp: float = 0.0
+    beta_amp: float = 0.0
+
     # Behavioural cross-reference (Doc 6). True when this EEG trial was aligned
     # to a flanker (OpenSesame) row that the participant answered INCORRECTLY.
     # Such trials are excluded from ALL analyses (theta, beta, RT) — an
@@ -160,8 +171,13 @@ class ChannelSummary:
     #     'n_surv_con', 'n_surv_inc', 'n_exc_con', 'n_exc_inc',
     #     'exclusion_pct_con', 'exclusion_pct_inc',
     #     'abs_median_con', 'abs_median_inc',
-    #     'rel_median_con', 'rel_median_inc'}}
+    #     'rel_median_con', 'rel_median_inc',
+    #     'amp_median_con', 'amp_median_inc'}}
     by_block: dict
+    # Band-filtered amplitude (µV) medians on surviving trials — individual-view
+    # only (spec §2). Not scale-invariant; never surfaced in group/CSV paths.
+    amp_median_con: float = 0.0
+    amp_median_inc: float = 0.0
     # Channel-scoped exclusion (work-order Task 7). When a contamination
     # finding (e.g. S005 on C3-C4 beta) invalidates ONE derivation/band, that
     # channel is marked excluded here while the other channel and behavioural
@@ -433,6 +449,39 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
     beta_tot = beta_spec.sum(axis=1)
     beta_rel = np.where(beta_tot > 0, beta_spec[:, BE_MASK].sum(axis=1) / beta_tot, 0.0)
 
+    # ---- Band-filtered amplitude (µV) — INDIVIDUAL VIEW ONLY (spec §2) -----
+    # A within-participant descriptive: theta-band amplitude at Fz-Pz and
+    # beta-band amplitude at C3-C4, band-FILTERED (not broadband), in µV. We
+    # band-pass the 1 Hz high-passed continuous signal into each band (MNE FIR,
+    # matching the house filter style used for the blink slow-band) and take the
+    # RMS over each trial's 0..WIN_S analysis window — the same window the power
+    # metrics use. RMS of a zero-mean band-limited signal is its amplitude in µV.
+    #
+    # This value is NOT scale-invariant the way relative power is (µV carries
+    # between-participant recording-scale differences), so it is confined to the
+    # individual view and must never enter any group aggregate or comparison CSV
+    # (spec §2 hard constraint). We compute it here only so it can be medianed
+    # per (refresh block × congruency) in _channel_summary for that view.
+    raw_theta = raw_hp.copy().filter(
+        l_freq=THETA_BAND[0], h_freq=THETA_BAND[1], verbose=False)
+    raw_beta = raw_hp.copy().filter(
+        l_freq=BETA_BAND[0], h_freq=BETA_BAND[1], verbose=False)
+    fz_theta = raw_theta.get_data(picks="Fz-Pz")[0] * 1e6   # µV, continuous
+    c3_beta = raw_beta.get_data(picks="C3-C4")[0] * 1e6
+    win_samples = int(round(WIN_S * fs))
+
+    def _rms_window(sig: np.ndarray, onset: int) -> float:
+        seg = sig[onset:onset + win_samples]
+        if seg.size == 0:
+            return 0.0
+        seg = seg - seg.mean()
+        return float(np.sqrt(np.mean(seg ** 2)))
+
+    theta_amp = np.array([_rms_window(fz_theta, t.onset_sample_concat)
+                          for t in trials_meta], dtype=float)
+    beta_amp = np.array([_rms_window(c3_beta, t.onset_sample_concat)
+                         for t in trials_meta], dtype=float)
+
     # ---- C3 contamination metrics (work-order Task 8 / S005 inputs) -------
     # Spectral-shape descriptors of the C3-C4 derivation, averaged over the
     # analysed epochs (hard rule 3 — never the whole file). Broadband EMG piles
@@ -506,6 +555,7 @@ def run_pipeline(parsed: ParsedEEG) -> PipelineResult:
             blink=blink, fz_exclude=fz_exclude, c3_exclude=c3_exclude, reason=reason,
             theta_abs=float(theta_abs[i]), theta_rel=float(theta_rel[i]),
             beta_abs=float(beta_abs[i]), beta_rel=float(beta_rel[i]),
+            theta_amp=float(theta_amp[i]), beta_amp=float(beta_amp[i]),
         ))
 
     # ---- Summaries ---------------------------------------------------------
@@ -659,6 +709,7 @@ def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude
 
     abs_attr = f"{band}_abs"
     rel_attr = f"{band}_rel"
+    amp_attr = f"{band}_amp"
 
     def _median(cond: str, attr: str) -> float:
         vals = [getattr(t, attr) for t in surviving if t.cond == cond]
@@ -693,6 +744,8 @@ def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude
             "abs_median_inc": _median_blk("first", abs_attr),
             "rel_median_con": _median_blk("con", rel_attr),
             "rel_median_inc": _median_blk("first", rel_attr),
+            "amp_median_con": _median_blk("con", amp_attr),
+            "amp_median_inc": _median_blk("first", amp_attr),
         }
 
     return ChannelSummary(
@@ -707,6 +760,8 @@ def _channel_summary(trials: List[TrialResult], channel: str, band: str, exclude
         rel_median_con=_median("con",   rel_attr),
         rel_median_inc=_median("first", rel_attr),
         by_block=by_block,
+        amp_median_con=_median("con",   amp_attr),
+        amp_median_inc=_median("first", amp_attr),
     )
 
 
