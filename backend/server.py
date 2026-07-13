@@ -45,6 +45,7 @@ from pipeline import (
 from demographics import (
     Demographic, DISPLAY_FIELDS,
     parse_demographics, match_demographics, parse_filename_ids,
+    handedness_category,
 )
 from behavioural import (
     BehaviouralSession, AlignmentResult,
@@ -464,6 +465,38 @@ def _block_hz_map(filename: str) -> Dict[int, str]:
     return dict(demo.block_order)
 
 
+def _handedness_of(filename: str) -> str:
+    """Canonical handedness category for a recording's participant.
+
+    Resolves the participant's demographics row and maps its handedness field to
+    'right' / 'left' / 'ambidextrous' / 'unknown'. Returns 'unknown' when
+    demographics are absent or unmatched. Used only to filter/label the group
+    view (reveal-only sensitivity check) — never to adjust any value.
+    """
+    if not _demographics:
+        return "unknown"
+    demo = match_demographics(filename, _demographics)
+    if demo is None:
+        return "unknown"
+    return handedness_category(demo.display.get("handedness"))
+
+
+# The handedness subsets the group view can restrict to. Each maps to the set of
+# categories that are KEPT. 'all' keeps everyone (including unknown); the split
+# is reveal-only — it recomputes group stats over the subset, never adjusts data.
+_HANDEDNESS_SUBSETS = {
+    "all": {"right", "left", "ambidextrous", "unknown"},
+    "right": {"right"},
+    "exclude-ambidextrous": {"right", "left", "unknown"},
+}
+
+
+def _in_handedness_subset(filename: str, subset: str) -> bool:
+    """Whether a recording's participant belongs to the active handedness subset."""
+    keep = _HANDEDNESS_SUBSETS.get(subset, _HANDEDNESS_SUBSETS["all"])
+    return _handedness_of(filename) in keep
+
+
 def _measure_trial_included(t: TrialResult, spec: dict) -> bool:
     # Doc 6: incorrectly-responded trials are excluded from every measure,
     # including RT (an error trial's reaction time is not comparable).
@@ -550,7 +583,7 @@ def _classify_incomplete(entry: dict, r, hz_map: Dict[int, str], measure_key: st
         )
 
 
-def _refresh_measure_payload(measure_key: str) -> dict:
+def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
     """Build the per-participant + group payload for one measure.
 
     Per participant we report BOTH the median (primary) and the mean of the
@@ -561,6 +594,13 @@ def _refresh_measure_payload(measure_key: str) -> dict:
     and the on-screen inspection toggle. The group headline (see ``group``)
     summarises the per-participant *median* differences with their MEAN Δ — the
     statistic matching the paired t-test — plus median/SD/95% CI as robustness.
+
+    ``subset`` restricts the group aggregate to a handedness subset ('all',
+    'right', 'exclude-ambidextrous'). Group stats and per-measure N recompute
+    over exactly the in-subset participants; out-of-subset participants are
+    dropped from the payload entirely so the view never implies a larger N than
+    contributed. This is the reveal-only beta handedness sensitivity check — it
+    never adjusts, regresses out, or normalises any value.
     """
     spec = _REFRESH_MEASURES[measure_key]
     dp = spec["decimals"]
@@ -573,10 +613,13 @@ def _refresh_measure_payload(measure_key: str) -> dict:
     rate_labels = set()
 
     for rid, r in _results.items():
+        if not _in_handedness_subset(r.filename, subset):
+            continue
         hz_map = _block_hz_map(r.filename)
         entry = {
             "result_id": rid,
             "filename": r.filename,
+            "handedness": _handedness_of(r.filename),
             "has_both": False,
             "conditions": {},     # hz_label -> {median, mean, n, trials:[...]}
             "diff": None,         # primary (median-based) high−low
@@ -699,7 +742,6 @@ def _refresh_measure_payload(measure_key: str) -> dict:
         "group_from_means": group_from_means,
         "provenance": _measure_provenance(measure_key, low, high),
     }
-
 
 def _measure_provenance(measure_key: str, low: str, high: str) -> dict:
     """The ordered processing chain from raw signal to the plotted number.
@@ -970,6 +1012,7 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
             "warnings": parsed.warnings,
             "alignment": [_alignment_payload(a) for a in alignment],
             "accuracy": _accuracy_payload(result_id),
+            "target_direction": _target_direction_payload(result_id),
             "checks": _checks_payload_for(result_id),
         }
 
@@ -1031,6 +1074,7 @@ async def subject_results(result_id: str):
         "warnings": list(getattr(parsed, "warnings", [])) if parsed else [],
         "alignment": [_alignment_payload(a) for a in alignment],
         "accuracy": _accuracy_payload(result_id),
+        "target_direction": _target_direction_payload(result_id),
         "checks": _checks_payload_for(result_id),
     }
 
@@ -1489,6 +1533,98 @@ def _accuracy_payload(subject_id: str) -> List[dict]:
     return per_block
 
 
+def _target_direction_of(bt) -> Optional[str]:
+    """Left/right target-arrow direction for a behavioural trial.
+
+    Response hand is stimulus-driven: a right-pointing target requires the right
+    finger, a left-pointing target the left finger. The correct response encodes
+    the direction deterministically ('x' = left-pointing, 'm' = right-pointing),
+    independent of congruency. Falls back to the centre arrow of the `targets`
+    string if correct_response is unexpectedly absent/unknown.
+
+    Returns "left", "right", or None (indeterminate).
+    """
+    cr = (getattr(bt, "correct_response", "") or "").strip().lower()
+    if cr == "x":
+        return "left"
+    if cr == "m":
+        return "right"
+    targets = getattr(bt, "targets", None)
+    if targets:
+        arrows = str(targets).split()
+        if arrows:
+            mid = arrows[len(arrows) // 2]
+            if "<" in mid:
+                return "left"
+            if ">" in mid:
+                return "right"
+    return None
+
+
+def _target_direction_payload(subject_id: str) -> List[dict]:
+    """Retained left- vs right-target trial counts per condition (QC / 4b).
+
+    Per block × congruency, counts the LEFT-target vs RIGHT-target trials that
+    SURVIVED into each band's analysis — i.e. post artifact-rejection AND post
+    accuracy-filter (the trials that actually enter the measure), not the
+    presented-trial counts. Purpose: confirm the left/right response-hand balance
+    is symmetric across the 60-vs-165 contrast in the retained data.
+
+    Target direction lives on the behavioural (OpenSesame) row; survival lives on
+    the aligned EEG epoch. We join via the per-block ``matched_pairs`` — the same
+    convention used by ``_accuracy_payload``. Requires behavioural alignment;
+    returns [] otherwise. EEG epochs with no behavioural match have unknown
+    direction and are counted under ``unknown``.
+
+    Each block entry carries, per band (theta on Fz-Pz, beta on C3-C4) and per
+    congruency (con/inc), the surviving left/right/unknown counts. Survival is
+    band-specific: an epoch may survive theta but be excluded on beta.
+    """
+    if subject_id not in _results or subject_id not in _behavioural:
+        return []
+    if subject_id not in _alignment:
+        return []
+
+    result = _results[subject_id]
+    session = _behavioural[subject_id]
+    hz_map = _block_hz_map(result.filename)
+    per_block: List[dict] = []
+
+    for align in _alignment[subject_id]:
+        blk = align.block
+        beh_block = [t for t in session.trials if t.block == blk]
+        eeg_block = [t for t in result.trials if t.block == blk]
+
+        def _empty_dir():
+            return {"left": 0, "right": 0, "unknown": 0}
+
+        counts = {
+            "theta": {"con": _empty_dir(), "inc": _empty_dir()},
+            "beta": {"con": _empty_dir(), "inc": _empty_dir()},
+        }
+
+        for eeg_i, beh_i in align.matched_pairs:
+            if eeg_i >= len(eeg_block) or beh_i >= len(beh_block):
+                continue
+            et = eeg_block[eeg_i]
+            bt = beh_block[beh_i]
+            cond = "con" if bt.congruent else "inc"
+            direction = _target_direction_of(bt) or "unknown"
+            # Band-specific survival = artifact-clean AND correct-response.
+            if not et.theta_excluded:
+                counts["theta"][cond][direction] += 1
+            if not et.beta_excluded:
+                counts["beta"][cond][direction] += 1
+
+        per_block.append({
+            "block": blk,
+            "refresh": hz_map.get(blk),
+            "counts": counts,
+        })
+
+    return per_block
+
+
 def _run_alignment(subject_id: str) -> List[AlignmentResult]:
     """Align the subject's EEG trials against its behavioural session.
 
@@ -1674,6 +1810,7 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
         "eeg_loaded": subject_id in _results,
         "alignment": [_alignment_payload(a) for a in alignment],
         "accuracy": _accuracy_payload(subject_id),
+        "target_direction": _target_direction_payload(subject_id),
         "missing_trials": missing_trials,
         "checks": _checks_payload_for(subject_id),
     }
@@ -1694,6 +1831,7 @@ async def get_behavioural(subject_id: str):
         "eeg_loaded": subject_id in _results,
         "alignment": [_alignment_payload(a) for a in alignment],
         "accuracy": _accuracy_payload(subject_id),
+        "target_direction": _target_direction_payload(subject_id),
         "checks": _checks_payload_for(subject_id),
     }
 
@@ -1728,7 +1866,7 @@ async def compare_subjects():
 
 
 @app.get("/api/refresh-comparison")
-async def refresh_comparison():
+async def refresh_comparison(handedness: str = "all"):
     """60 Hz vs 165 Hz comparison for theta rel, beta rel and reaction time.
 
     Per participant: the mean value in each refresh condition and the
@@ -1737,18 +1875,34 @@ async def refresh_comparison():
     Refresh rate is derived from demographics block_order (not block number).
     Each measure also carries a provenance chain describing the processing
     stages and the retained config values used to produce the plotted number.
+
+    ``handedness`` restricts the comparison to a handedness subset:
+    ``all`` (default), ``right`` (right-handers only), or
+    ``exclude-ambidextrous``. Group stats and per-measure N are RECOMPUTED over
+    the subset — not merely hidden. This is the reveal-only beta handedness
+    sensitivity check; it never adjusts or normalises any value.
     """
     if len(_results) < 1:
         raise HTTPException(400, "No participants loaded. Upload files first.")
 
-    measures = [_refresh_measure_payload(k) for k in _REFRESH_MEASURES]
+    subset = handedness if handedness in _HANDEDNESS_SUBSETS else "all"
+    measures = [_refresh_measure_payload(k, subset) for k in _REFRESH_MEASURES]
     # A subject is fully usable here only if its demographics carry a block
-    # order; surface how many do so the UI can warn.
-    n_with_order = sum(1 for r in _results.values() if _block_hz_map(r.filename))
+    # order; surface how many do so the UI can warn. Counts respect the subset.
+    in_subset = [r for r in _results.values() if _in_handedness_subset(r.filename, subset)]
+    n_with_order = sum(1 for r in in_subset if _block_hz_map(r.filename))
+    # Handedness census across ALL loaded participants (for the subset selector
+    # labels — e.g. "24 right / 7 left / 2 ambidextrous").
+    hand_counts = {"right": 0, "left": 0, "ambidextrous": 0, "unknown": 0}
+    for r in _results.values():
+        hand_counts[_handedness_of(r.filename)] += 1
     return {
         "measures": measures,
-        "n_subjects": len(_results),
+        "n_subjects": len(in_subset),
+        "n_subjects_total": len(_results),
         "n_with_refresh_order": n_with_order,
+        "handedness_subset": subset,
+        "handedness_counts": hand_counts,
     }
 
 

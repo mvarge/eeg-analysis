@@ -50,6 +50,31 @@ DISPLAY_FIELDS = [
 FILENAME_PATTERN = re.compile(r"S(\d+)P(\d+)", re.IGNORECASE)
 
 
+def handedness_category(value: Optional[str]) -> str:
+    """Map the verbatim demographics handedness string to a canonical category.
+
+    The demographics CSV stores free-form-ish values ("Right-handed",
+    "Left-handed", "Ambidextrous"). We normalise to one of four buckets so the
+    group view can filter/colour by handedness without depending on the exact
+    surface string. This is a *display/filter* categoriser only — it never
+    adjusts or normalises the data (handedness sensitivity is reveal-only).
+
+    Returns one of: "right", "left", "ambidextrous", "unknown".
+    """
+    if not value:
+        return "unknown"
+    v = str(value).strip().lower()
+    if not v:
+        return "unknown"
+    if v.startswith("ambi"):
+        return "ambidextrous"
+    if v.startswith("right") or v in ("r", "rh"):
+        return "right"
+    if v.startswith("left") or v in ("l", "lh"):
+        return "left"
+    return "unknown"
+
+
 @dataclass
 class Demographic:
     """One participant's demographic record."""

@@ -185,6 +185,27 @@
                 </p>
             </div>
 
+            <!-- Retained left/right target-direction QC (only when behavioural CSV aligned) -->
+            <div class="demographics-panel target-dir-panel" id="target-dir-panel" hidden>
+                <div class="demo-header">
+                    <span class="demo-title">
+                        <span class="demo-icon">⇄</span>
+                        Retained trials by target direction
+                    </span>
+                    <span class="demo-subject" id="target-dir-summary">—</span>
+                </div>
+                <div class="target-dir-body" id="target-dir-body"></div>
+                <p class="accuracy-note">
+                    Left- vs right-pointing target trials that <strong>survived</strong>
+                    into the analysis (post artifact-rejection and post
+                    accuracy-filter) per condition, per band. Response hand is
+                    stimulus-driven (right finger for a right-pointing target, left
+                    finger for a left-pointing target), so this confirms left/right
+                    response-hand balance is symmetric across the 60-vs-165 contrast.
+                    Counts reflect retained survivors, not presented trials.
+                </p>
+            </div>
+
             <!-- Power Summary Cards -->
             <div class="power-cards">
                 <div class="power-card theta">
@@ -452,6 +473,18 @@
                     <button type="button" class="seg-btn" data-agg="both">Side by side</button>
                 </div>
                 <span class="refresh-toolbar-note">Export always carries both; the group headline is unaffected.</span>
+            </div>
+            <div class="refresh-toolbar">
+                <span class="refresh-toolbar-label">Handedness subset (recomputes group stats &amp; N):</span>
+                <div class="seg-toggle" id="handedness-subset-toggle" role="group" aria-label="Handedness subset">
+                    <button type="button" class="seg-btn active" data-subset="all">All</button>
+                    <button type="button" class="seg-btn" data-subset="right">Right-handers only</button>
+                    <button type="button" class="seg-btn" data-subset="exclude-ambidextrous">Exclude ambidextrous</button>
+                </div>
+                <label class="refresh-toolbar-check">
+                    <input type="checkbox" id="handedness-colour-toggle"> Colour lines by handedness
+                </label>
+                <span class="refresh-toolbar-note" id="handedness-subset-note"></span>
             </div>
             <div id="refresh-overview" class="refresh-overview" hidden></div>
             <div id="refresh-warning" class="refresh-warning" hidden></div>

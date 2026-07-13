@@ -589,6 +589,81 @@ function renderAccuracyPanel(accuracy) {
 }
 
 
+// Retained left/right target-direction breakdown (4b). Per block × condition,
+// the left- vs right-target trials that SURVIVED into each band's analysis
+// (post artifact-rejection and post accuracy-filter). Reveal-only QC: confirms
+// response-hand balance is symmetric across the 60-vs-165 contrast. Hidden when
+// no behavioural data is aligned (target direction comes from the behavioural
+// CSV). Defaults to the theta (Fz-Pz) band; a toggle switches to beta (C3-C4).
+let targetDirBand = 'theta';
+let _targetDirData = null;
+
+function renderTargetDirectionPanel(targetDirection) {
+    const panel = document.getElementById('target-dir-panel');
+    if (!panel) return;
+    _targetDirData = targetDirection;
+    if (!targetDirection || !targetDirection.length) {
+        panel.hidden = true;
+        return;
+    }
+    panel.hidden = false;
+
+    const band = targetDirBand;
+    const bandLabel = band === 'theta' ? 'θ Fz-Pz' : 'β C3-C4';
+
+    // Overall left/right totals across all retained trials for the active band.
+    let totL = 0, totR = 0, totU = 0;
+    targetDirection.forEach(blk => {
+        ['con', 'inc'].forEach(c => {
+            const d = blk.counts?.[band]?.[c];
+            if (d) { totL += d.left; totR += d.right; totU += d.unknown; }
+        });
+    });
+
+    const summary = document.getElementById('target-dir-summary');
+    if (summary) {
+        summary.textContent = `${bandLabel} · ${totL} left-target / ${totR} right-target retained`
+            + (totU ? ` (${totU} unknown)` : '');
+    }
+
+    const bandToggle = `
+        <div class="seg-toggle target-dir-band-toggle" role="group" aria-label="Band">
+            <button type="button" class="seg-btn ${band === 'theta' ? 'active' : ''}" data-td-band="theta">θ Fz-Pz</button>
+            <button type="button" class="seg-btn ${band === 'beta' ? 'active' : ''}" data-td-band="beta">β C3-C4</button>
+        </div>`;
+
+    // One card per block; within it, con/inc rows each showing left | right (| unknown).
+    const cards = targetDirection.map(blk => {
+        const rows = ['con', 'inc'].map(c => {
+            const d = blk.counts?.[band]?.[c] || { left: 0, right: 0, unknown: 0 };
+            const n = d.left + d.right + d.unknown;
+            const condName = c === 'con' ? 'Congruent' : 'Incongruent';
+            const unk = d.unknown ? ` · <span class="td-unknown">${d.unknown} unk</span>` : '';
+            return `<div class="td-row">
+                <span class="td-cond">${condName}</span>
+                <span class="td-counts"><span class="td-left">◄ ${d.left} left</span> · <span class="td-right">${d.right} right ►</span>${unk}</span>
+                <span class="td-n">n=${n}</span>
+            </div>`;
+        }).join('');
+        const blkLabel = blk.refresh ? `Block ${blk.block} · ${escapeHtml(blk.refresh)}` : `Block ${blk.block}`;
+        return `<div class="td-card">
+            <div class="td-card-head">${blkLabel}</div>
+            ${rows}
+        </div>`;
+    }).join('');
+
+    const body = document.getElementById('target-dir-body');
+    body.innerHTML = `<div class="td-toolbar">${bandToggle}</div>${cards}`;
+
+    body.querySelectorAll('.target-dir-band-toggle .seg-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            targetDirBand = btn.dataset.tdBand;
+            renderTargetDirectionPanel(_targetDirData);
+        });
+    });
+}
+
+
 // Apply the docs/DATA_VALIDITY_CHECKING.md §7 J-code gates and return a
 // UI-friendly severity + label + detail message.
 function alignmentGateStatus(a) {
@@ -723,6 +798,7 @@ async function refreshAlignmentForCurrentSubject() {
         const d = await resp.json();
         renderAlignmentPanel(d.alignment, d.accuracy);
         renderAccuracyPanel(d.accuracy);
+        renderTargetDirectionPanel(d.target_direction);
         renderChecksPanel(d.checks);
     } catch (_) { /* backend unreachable — leave panel hidden */ }
 }
@@ -789,6 +865,7 @@ function initBehaviouralUpload() {
                 if (currentResultId && data.subject_id === currentResultId) {
                     renderAlignmentPanel(data.alignment, data.accuracy);
                     renderAccuracyPanel(data.accuracy);
+                    renderTargetDirectionPanel(data.target_direction);
                     renderChecksPanel(data.checks);
                     // Trial numbering now uses flanker task numbers and the
                     // missing-trials box may have populated — reload the full
@@ -862,6 +939,7 @@ function showResults(data) {
     // on demand; results endpoint doesn't yet include it, so we pull it.
     renderAlignmentPanel(data.alignment, data.accuracy);
     renderAccuracyPanel(data.accuracy);
+    renderTargetDirectionPanel(data.target_direction);
     refreshAlignmentForCurrentSubject();
 
     // Validity checks (always emitted by the backend when EEG is loaded)
@@ -2216,11 +2294,29 @@ let refreshData = null;
 // headline (always mean Δ of per-participant medians) nor the CSV export (always
 // carries both aggregations).
 let refreshAgg = 'median';
+// Handedness sensitivity check (reveal-only). `handednessSubset` restricts the
+// group comparison to a subset ('all' | 'right' | 'exclude-ambidextrous') and
+// forces a refetch (the backend RECOMPUTES group stats + N for the subset).
+// `handednessColour` toggles colouring the paired-plot lines by handedness
+// category — purely visual, no recompute.
+let handednessSubset = 'all';
+let handednessColour = false;
+
+// Colours for the handedness categories on the paired plots (4c).
+const HANDEDNESS_COLORS = {
+    right: '#5eead4',
+    left: '#f472b6',
+    ambidextrous: '#fbbf24',
+    unknown: '#6b7394',
+};
+const HANDEDNESS_LABELS = {
+    right: 'Right', left: 'Left', ambidextrous: 'Ambidextrous', unknown: 'Unknown',
+};
 
 async function showRefreshComparison() {
     let data;
     try {
-        const resp = await fetch(`${API}/api/refresh-comparison`);
+        const resp = await fetch(`${API}/api/refresh-comparison?handedness=${encodeURIComponent(handednessSubset)}`);
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({}));
             alert(err.detail || 'Refresh-rate comparison failed');
@@ -2239,6 +2335,8 @@ async function showRefreshComparison() {
     document.getElementById('refresh-section').hidden = false;
     saveSession({ view: 'refresh' });
 
+    renderHandednessSubsetNote(data);
+
     // List subjects excluded from the group stats, with WHY — distinguishing a
     // benign data gap (safely excluded) from a fixable upstream block/merge fault.
     renderRefreshExclusions(data);
@@ -2247,6 +2345,22 @@ async function showRefreshComparison() {
     renderRefreshOverview(data.measures);
 
     renderRefreshMeasures(data.measures);
+}
+
+// Show the active handedness subset + the sample's handedness census, so the
+// analyst can see exactly which participants the group stats were computed over.
+function renderHandednessSubsetNote(data) {
+    const noteEl = document.getElementById('handedness-subset-note');
+    if (!noteEl) return;
+    const c = data.handedness_counts || {};
+    const census = `${c.right || 0} right / ${c.left || 0} left / ${c.ambidextrous || 0} ambidextrous`
+        + (c.unknown ? ` / ${c.unknown} unknown` : '');
+    const subsetLabel = {
+        'all': 'all participants',
+        'right': 'right-handers only',
+        'exclude-ambidextrous': 'ambidextrous excluded',
+    }[data.handedness_subset] || 'all participants';
+    noteEl.textContent = `Active subset: ${subsetLabel} — N=${data.n_subjects} of ${data.n_subjects_total} loaded (sample: ${census}).`;
 }
 
 // Top-of-page overview: the average (mean Δ) difference across the sample for
@@ -2486,6 +2600,11 @@ function renderRefreshMeasures(measures) {
 // Grouped bar: per participant, the two refresh-condition values side by side.
 // Uses the selected inspection aggregation (median primary / mean); in 'both'
 // mode it plots the median (the primary) to keep the chart readable.
+// Paired ("spaghetti") plot: one line per participant joining its two
+// refresh-condition values (low Hz → high Hz). Shows whether the group effect is
+// consistent or driven by a few participants. When the handedness-colour toggle
+// is on, each line is coloured by the participant's handedness category (4c) so
+// left-handers / ambidextrous outliers are visible; otherwise a single accent.
 function drawRefreshChart(containerId, m) {
     const complete = m.participants.filter(p => p.has_both);
     if (!complete.length) {
@@ -2494,28 +2613,45 @@ function drawRefreshChart(containerId, m) {
         return;
     }
     const a = (refreshAgg === 'mean') ? 'mean' : 'median';
-    const names = complete.map(p => p.filename);
-    const lo = complete.map(p => p.conditions[m.rate_low][a]);
-    const hi = complete.map(p => p.conditions[m.rate_high][a]);
+    const xLabels = [m.rate_low, m.rate_high];
 
-    const traces = [
-        {
-            type: 'bar', name: m.rate_low, x: names, y: lo,
-            marker: { color: CON_COLOR },
-            hovertemplate: `%{x}<br>${m.rate_low} (${a}): %{y}<extra></extra>`,
-        },
-        {
-            type: 'bar', name: m.rate_high, x: names, y: hi,
-            marker: { color: INC_COLOR },
-            hovertemplate: `%{x}<br>${m.rate_high} (${a}): %{y}<extra></extra>`,
-        },
-    ];
+    const traces = [];
+    const seenHandCats = new Set();
+    complete.forEach((p, i) => {
+        const cat = p.handedness || 'unknown';
+        const colour = handednessColour
+            ? (HANDEDNESS_COLORS[cat] || HANDEDNESS_COLORS.unknown)
+            : SUBJECT_COLORS[i % SUBJECT_COLORS.length];
+        // Group legend by handedness category when colouring by it; otherwise
+        // one legend entry per participant would be too noisy, so hide it.
+        const showLegend = handednessColour && !seenHandCats.has(cat);
+        if (showLegend) seenHandCats.add(cat);
+        traces.push({
+            type: 'scatter',
+            mode: 'lines+markers',
+            name: handednessColour ? (HANDEDNESS_LABELS[cat] || 'Unknown') : p.filename,
+            legendgroup: handednessColour ? cat : p.filename,
+            showlegend: handednessColour ? showLegend : false,
+            x: xLabels,
+            y: [p.conditions[m.rate_low][a], p.conditions[m.rate_high][a]],
+            line: { color: colour, width: 1.6 },
+            marker: { color: colour, size: 6 },
+            opacity: handednessColour ? 0.85 : 0.6,
+            hovertemplate: `${escapeHtml(p.filename)} (${HANDEDNESS_LABELS[cat] || 'Unknown'})<br>%{x} (${a}): %{y}<extra></extra>`,
+        });
+    });
+
     const layout = {
         ...plotlyLayout,
-        barmode: 'group',
-        height: 260,
-        margin: { t: 10, r: 15, b: 55, l: 55 },
-        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
+        height: 280,
+        margin: { t: 10, r: 15, b: 45, l: 55 },
+        showlegend: handednessColour,
+        xaxis: {
+            ...plotlyLayout.xaxis,
+            type: 'category',
+            tickfont: { size: 10 },
+            range: [-0.35, 1.35],
+        },
         yaxis: { ...plotlyLayout.yaxis, title: { text: m.unit, font: { size: 10 } } },
     };
     Plotly.newPlot(containerId, traces, layout, plotlyConfig);
@@ -2736,6 +2872,32 @@ function initActions() {
                     b.classList.toggle('active', b === btn));
                 if (refreshData) renderRefreshMeasures(refreshData.measures);
             });
+        });
+    }
+
+    // Handedness subset toggle (4a). Unlike the aggregation toggle, changing the
+    // subset REFETCHES so the backend recomputes group stats + per-measure N for
+    // exactly the in-subset participants (never a hide-only filter).
+    const subsetToggle = document.getElementById('handedness-subset-toggle');
+    if (subsetToggle) {
+        subsetToggle.querySelectorAll('.seg-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (handednessSubset === btn.dataset.subset) return;
+                handednessSubset = btn.dataset.subset;
+                subsetToggle.querySelectorAll('.seg-btn').forEach(b =>
+                    b.classList.toggle('active', b === btn));
+                showRefreshComparison();  // refetch + full re-render
+            });
+        });
+    }
+
+    // Handedness colour toggle (4c). Purely visual — re-renders the paired plots
+    // from the already-loaded data; no refetch, no recompute.
+    const colourToggle = document.getElementById('handedness-colour-toggle');
+    if (colourToggle) {
+        colourToggle.addEventListener('change', () => {
+            handednessColour = colourToggle.checked;
+            if (refreshData) renderRefreshMeasures(refreshData.measures);
         });
     }
 
