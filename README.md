@@ -33,7 +33,7 @@ This tool implements a 10-stage pipeline built around **complex Morlet wavelet**
 7. **Complex Morlet wavelet spectral power** — 1–40 Hz in 0.5 Hz steps. Theta uses 3-cycle wavelets (4–8 Hz), beta uses 7-cycle wavelets (13–30 Hz). Reports both **absolute** power and **relative** power (band ÷ 1–40 Hz total, expressed as a fraction).
 8. **Per-condition medians** on the surviving trials — separately for congruent and incongruent.
 9. **Balance check** — flags a channel if per-condition exclusion rates differ by more than 10 %-points.
-10. **Export SPSS-ready CSVs** with per-trial rows, per-subject summary rows, and combined multi-subject files.
+10. **Export SPSS-ready CSVs** with per-trial rows, per-participant summary rows, and combined multi-participant files.
 
 The primary metric is **relative power** (fraction of total 1–40 Hz power falling in each band), which is more robust to individual differences in overall amplitude than absolute power.
 
@@ -47,7 +47,7 @@ The landing page. A drop zone accepts one or more LabChart `.txt` files (or clic
 
 - **One file** → jumps to the individual analysis screen
 - **Multiple files** → jumps to the group comparison screen
-- You can also add subjects one at a time
+- You can also add participants one at a time
 
 ### Screen 2 — Individual Analysis
 
@@ -74,27 +74,27 @@ Shows the full analysis for a single participant.
 
 - **Trial CSV** — one row per trial with all 6 quality metrics, exclusion flags, and absolute/relative power
 - **Exclusions CSV** — one row per excluded trial with the reason
-- **Summary CSV** — one row for this subject with all medians and survival counts
-- **Add Another Subject** / **Compare Subjects** / **Start Over**
+- **Summary CSV** — one row for this participant with all medians and survival counts
+- **Add Another Participant** / **Compare Participants** / **Start Over**
 
 ### Screen 3 — Group Comparison
 
-Shows all uploaded subjects side by side.
+Shows all uploaded participants side by side.
 
-**Summary table** — one row per subject: recording date, theta/beta relative medians (con and inc), survival counts, balance flags.
+**Summary table** — one row per participant: recording date, theta/beta relative medians (con and inc), survival counts, balance flags.
 
 **Comparison charts:**
 
-- **Theta Relative Power by Subject** — grouped bars, con vs inc per subject
-- **Beta Relative Power by Subject** — same for beta
-- **Exclusion Rate by Subject** — theta and beta exclusion percentages, so you can spot noisy recordings
-- **Congruency Effect by Subject** — bar chart of (inc − con) theta relative power, the Flanker effect
+- **Theta Relative Power by Participant** — grouped bars, con vs inc per participant
+- **Beta Relative Power by Participant** — same for beta
+- **Exclusion Rate by Participant** — theta and beta exclusion percentages, so you can spot noisy recordings
+- **Congruency Effect by Participant** — bar chart of (inc − con) theta relative power, the Flanker effect
 
 **Action buttons:**
 
-- **Group Summary CSV** — one row per subject
-- **Group Trial CSV** — every trial from every subject in one flat file (ideal for SPSS repeated-measures)
-- **Add More Subjects** / **← Back to Individual**
+- **Group Summary CSV** — one row per participant
+- **Group Trial CSV** — every trial from every participant in one flat file (ideal for SPSS repeated-measures)
+- **Add More Participants** / **← Back to Individual**
 
 ### Navigation
 
@@ -186,7 +186,7 @@ Blocks are detected automatically from the >30 s pause between them.
 
 ### Test Data
 
-Generate fake subject files without touching real data:
+Generate fake participant files without touching real data:
 
 **macOS / Linux:**
 ```bash
@@ -208,7 +208,7 @@ This drops three files (`S1P003.txt`–`S1P005.txt`) into `data/`.
 
 | Column | Meaning |
 |--------|---------|
-| `recording` | Subject identifier |
+| `recording` | Participant identifier |
 | `trial` | 1-based trial number |
 | `block`, `btrial` | Block number and within-block trial number |
 | `cond` | `con` or `first` (incongruent) |
@@ -224,11 +224,11 @@ This drops three files (`S1P003.txt`–`S1P005.txt`) into `data/`.
 | `theta_abs`, `theta_rel` | Absolute and relative theta wavelet power (Fz-Pz) |
 | `beta_abs`, `beta_rel` | Absolute and relative beta wavelet power (C3-C4) |
 
-### Summary CSV (one row per subject)
+### Summary CSV (one row per participant)
 
 | Column | Meaning |
 |--------|---------|
-| `recording`, `recording_date` | Subject and timestamp |
+| `recording`, `recording_date` | Participant and timestamp |
 | `theta_surviving`, `theta_excluded` | Trial counts on Fz-Pz |
 | `theta_rel_median_con`, `theta_rel_median_inc` | Relative theta medians |
 | `theta_abs_median_con`, `theta_abs_median_inc` | Absolute theta medians |
@@ -247,7 +247,7 @@ This drops three files (`S1P003.txt`–`S1P005.txt`) into `data/`.
 | `channel` | `Fz-Pz` or `C3-C4` |
 | `reason` | Which rejection rules fired (`blink`, `gross EMG`, `burst`, `coincidence`) |
 
-> The trial-level CSV is best for SPSS — a single flat table you can sort/filter by subject, block, and condition. The exclusion flags let you replicate or override the automatic rejection.
+> The trial-level CSV is best for SPSS — a single flat table you can sort/filter by participant, block, and condition. The exclusion flags let you replicate or override the automatic rejection.
 
 ---
 

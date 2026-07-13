@@ -53,7 +53,7 @@
                     </div>
                 </div>
                 <div id="staging-groups" class="staging-groups"></div>
-                <p class="staging-hint">Grouped by subject ID. Remove any file that shouldn't be analysed (e.g. a non-recording export) before analysing.</p>
+                <p class="staging-hint">Grouped by participant ID. Remove any file that shouldn't be analysed (e.g. a non-recording export) before analysing.</p>
             </div>
 
             <div id="upload-progress" class="progress-bar" hidden>
@@ -357,15 +357,15 @@
                     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                         <path d="M9 4v10M4 9h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                     </svg>
-                    Add Another Subject
+                    Add Another Participant
                 </button>
-                <button id="btn-compare" class="btn-secondary" disabled>Compare Subjects</button>
+                <button id="btn-compare" class="btn-secondary" disabled>Compare Participants</button>
                 <button id="btn-refresh-view" class="btn-secondary">60 vs 165 Hz</button>
                 <button id="btn-new" class="btn-secondary">Start Over</button>
             </div>
 
             <div id="subject-list" class="subject-list" hidden>
-                <h3>Uploaded Subjects</h3>
+                <h3>Uploaded Participants</h3>
                 <div id="subject-items"></div>
             </div>
         </section>
@@ -389,15 +389,15 @@
 
             <div class="charts-grid">
                 <div class="chart-panel">
-                    <h3>θ Relative Power by Subject (Fz-Pz)</h3>
+                    <h3>θ Relative Power by Participant (Fz-Pz)</h3>
                     <div id="chart-compare-theta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>β Relative Power by Subject (C3-C4)</h3>
+                    <h3>β Relative Power by Participant (C3-C4)</h3>
                     <div id="chart-compare-beta" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
-                    <h3>Exclusion Rate by Subject</h3>
+                    <h3>Exclusion Rate by Participant</h3>
                     <div id="chart-compare-exclusion" class="chart-container"></div>
                 </div>
                 <div class="chart-panel">
@@ -421,7 +421,7 @@
                     </svg>
                     Group Trial-Level CSV
                 </button>
-                <button id="btn-add-more" class="btn-secondary">Add More Subjects</button>
+                <button id="btn-add-more" class="btn-secondary">Add More Participants</button>
             </div>
         </section>
 
@@ -465,7 +465,7 @@
                     </svg>
                     Download 60-vs-165 CSV
                 </button>
-                <button id="btn-refresh-add-more" class="btn-secondary">Add More Subjects</button>
+                <button id="btn-refresh-add-more" class="btn-secondary">Add More Participants</button>
             </div>
         </section>
     </main>

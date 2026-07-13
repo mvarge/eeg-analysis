@@ -588,7 +588,7 @@ def _refresh_measure_payload(measure_key: str) -> dict:
         }
         if not hz_map:
             entry["note"] = (
-                "No refresh-rate ordering in demographics — subject correctly "
+                "No refresh-rate ordering in demographics — participant correctly "
                 "excluded from this comparison."
             )
             entry["exclusion_kind"] = "no_ordering"
@@ -861,8 +861,8 @@ async def upload_eeg(files: List[UploadFile] = File(...)):
         logger.warning("upload_eeg mixed subject IDs: %s", sorted(sids))
         raise HTTPException(
             400,
-            f"Files in one upload must share a subject ID; got {sorted(sids)}. "
-            "Upload each subject's files as a separate request.",
+            f"Files in one upload must share a participant ID; got {sorted(sids)}. "
+            "Upload each participant's files as a separate request.",
         )
     subject_id = parsed_names[0].subject_id
     logger.info("upload_eeg subject_id resolved to %s", subject_id)
@@ -1013,7 +1013,7 @@ async def subject_results(result_id: str):
     without re-uploading. 404 if the subject is not in memory.
     """
     if result_id not in _results:
-        raise HTTPException(404, f"Subject '{result_id}' not found. Upload it first.")
+        raise HTTPException(404, f"Participant '{result_id}' not found. Upload it first.")
 
     result = _results[result_id]
     parsed = _parsed.get(result_id)
@@ -1115,15 +1115,15 @@ async def subject_epoch(result_id: str, trial: int, scalogram: bool = False):
     ``scalogram=true`` additionally returns the time×frequency CWT (nice-to-have).
     """
     if result_id not in _results:
-        raise HTTPException(404, f"Subject '{result_id}' not found. Upload it first.")
+        raise HTTPException(404, f"Participant '{result_id}' not found. Upload it first.")
     parsed = _parsed.get(result_id)
     if parsed is None:
-        raise HTTPException(409, "Continuous signal for this subject is no longer in memory.")
+        raise HTTPException(409, "Continuous signal for this participant is no longer in memory.")
 
     result = _results[result_id]
     tr = next((t for t in result.trials if t.trial == trial), None)
     if tr is None:
-        raise HTTPException(404, f"Trial {trial} not found for subject '{result_id}'.")
+        raise HTTPException(404, f"Trial {trial} not found for participant '{result_id}'.")
 
     # Map the (post-merge, renumbered) trial back to its sample in the retained
     # continuous signal. parsed.trials is the post-block-selection list and is
@@ -1178,10 +1178,10 @@ async def subject_recording(result_id: str, max_points: int = 12000):
     outside the returned epoch-window spans, so the frontend can grey it out.
     """
     if result_id not in _results:
-        raise HTTPException(404, f"Subject '{result_id}' not found. Upload it first.")
+        raise HTTPException(404, f"Participant '{result_id}' not found. Upload it first.")
     parsed = _parsed.get(result_id)
     if parsed is None:
-        raise HTTPException(409, "Continuous signal for this subject is no longer in memory.")
+        raise HTTPException(409, "Continuous signal for this participant is no longer in memory.")
 
     result = _results[result_id]
     max_points = max(1000, min(int(max_points), 40000))
@@ -1608,7 +1608,7 @@ async def upload_behavioural(files: List[UploadFile] = File(...)):
         )
         raise HTTPException(
             400,
-            f"Behavioural files in one upload must share a subject ID; "
+            f"Behavioural files in one upload must share a participant ID; "
             f"got {sorted(sids_from_filename)}."
         )
     filename_subject_id = next(iter(sids_from_filename)) if sids_from_filename else None
@@ -1713,7 +1713,7 @@ async def remove_behavioural(subject_id: str):
 async def compare_subjects():
     """Aggregate payload for the group view."""
     if len(_results) < 2:
-        raise HTTPException(400, "Need at least 2 subjects to compare. Upload more files.")
+        raise HTTPException(400, "Need at least 2 participants to compare. Upload more files.")
 
     return {
         "subjects": [
@@ -1739,7 +1739,7 @@ async def refresh_comparison():
     stages and the retained config values used to produce the plotted number.
     """
     if len(_results) < 1:
-        raise HTTPException(400, "No subjects loaded. Upload files first.")
+        raise HTTPException(400, "No participants loaded. Upload files first.")
 
     measures = [_refresh_measure_payload(k) for k in _REFRESH_MEASURES]
     # A subject is fully usable here only if its demographics carry a block

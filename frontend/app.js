@@ -182,7 +182,7 @@ function initUpload() {
         }
         staging.hidden = false;
         const groups = groupStaged();
-        countEl.textContent = `(${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''}, ${groups.size} subject${groups.size > 1 ? 's' : ''})`;
+        countEl.textContent = `(${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''}, ${groups.size} participant${groups.size > 1 ? 's' : ''})`;
 
         groupsEl.innerHTML = Array.from(groups.entries()).map(([sid, group]) => {
             const rows = group.map(f => `
@@ -321,9 +321,9 @@ function initUpload() {
             lines.push(`<div class="upload-summary-line fail">✕ ${escapeHtml(f.sid)} failed <span class="us-detail">${escapeHtml(f.message)}</span></div>`);
         }
         if (totalAvailable > 0) {
-            lines.push(`<div class="upload-summary-line"><span class="us-detail">${totalAvailable} subject${totalAvailable > 1 ? 's' : ''} available to view. Remove or fix the failed file(s) below and analyse again, or continue.</span></div>`);
+            lines.push(`<div class="upload-summary-line"><span class="us-detail">${totalAvailable} participant${totalAvailable > 1 ? 's' : ''} available to view. Remove or fix the failed file(s) below and analyse again, or continue.</span></div>`);
         } else {
-            lines.push(`<div class="upload-summary-line"><span class="us-detail">No subjects available yet. Remove the offending file(s) below and analyse again.</span></div>`);
+            lines.push(`<div class="upload-summary-line"><span class="us-detail">No participants available yet. Remove the offending file(s) below and analyse again.</span></div>`);
         }
         body.innerHTML = lines.join('');
 
@@ -801,7 +801,7 @@ function initBehaviouralUpload() {
         }
 
         setBehaviouralStatus(
-            `${uploaded} subject${uploaded !== 1 ? 's' : ''} loaded · ${matched} aligned to EEG`,
+            `${uploaded} participant${uploaded !== 1 ? 's' : ''} loaded · ${matched} aligned to EEG`,
             uploaded > 0,
         );
         document.getElementById('beh-upload-label').textContent = 'Upload more CSVs';
@@ -2016,7 +2016,7 @@ async function loadSubject(resultId) {
         const resp = await fetch(`${API}/api/subjects/${encodeURIComponent(resultId)}/results`);
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({}));
-            alert(err.detail || 'Could not load subject.');
+            alert(err.detail || 'Could not load participant.');
             return;
         }
         const data = await resp.json();
@@ -2024,7 +2024,7 @@ async function loadSubject(resultId) {
         document.getElementById('upload-section').hidden = true;
         showResults(data);
     } catch (err) {
-        alert('Error loading subject: ' + err.message);
+        alert('Error loading participant: ' + err.message);
     }
 }
 
@@ -2032,8 +2032,8 @@ function updateCompareButton() {
     const btn = document.getElementById('btn-compare');
     btn.disabled = uploadedSubjects.length < 2;
     btn.textContent = uploadedSubjects.length < 2
-        ? 'Compare Subjects'
-        : `Compare ${uploadedSubjects.length} Subjects`;
+        ? 'Compare Participants'
+        : `Compare ${uploadedSubjects.length} Participants`;
 }
 
 // ── Group comparison ──
@@ -2063,7 +2063,7 @@ async function showComparison() {
             ? '<th>Age</th><th>Sex</th><th>Hand</th><th>Block order</th>'
             : '';
         thead.innerHTML = `<tr>
-            <th></th><th>Subject</th><th>Date</th>
+            <th></th><th>Participant</th><th>Date</th>
             ${demoCols}
             <th>θ rel con</th><th>θ rel inc</th><th>θ Δ</th>
             <th>β rel con</th><th>β rel inc</th>
@@ -2352,7 +2352,7 @@ function renderRefreshExclusions(data) {
     warnEl.hidden = false;
     warnEl.classList.toggle('refresh-warning-alert', anyFixable);
     warnEl.innerHTML = `
-        <div class="rx-head">${bySubject.size} subject(s) excluded from the group comparison${anyFixable ? ' — one or more may be a fixable upstream problem' : ''}:</div>
+        <div class="rx-head">${bySubject.size} participant(s) excluded from the group comparison${anyFixable ? ' — one or more may be a fixable upstream problem' : ''}:</div>
         ${cards}`;
 }
 
