@@ -68,11 +68,22 @@ FILENAME_PATTERN = re.compile(r"S(\d+)P(\d+)", re.IGNORECASE)
 #   HIGH = avg_hours >= HIGH AND week_hours >= HIGH
 #          AND game_type in the fast-paced / both set
 #   LOW  = avg_hours <= LOW  AND week_hours <= LOW      (game_type ignored)
-#   EXCLUDED (from H2/H4) = everything else. Captures: (a) >=HIGH on one hours
+#   EXCLUDED (from H2/H4) = data present & recognised, but the rule places the
+#          participant in neither group. Captures: (a) >=HIGH on one hours
 #          measure but <=LOW on the other; (b) >=HIGH on both but game_type is
 #          slower-paced / none; (c) any hours value strictly between LOW and
 #          HIGH (e.g. 4.5), which satisfies neither gate.
 #
+# Two further outcomes are distinct from EXCLUDED — the participant *cannot* be
+# classified because their data is missing or unreadable, rather than the rule
+# deliberately placing them outside both groups:
+#   UNCLASSIFIED_MISSING = avg_hours, week_hours, or game_type is blank/absent.
+#   UNCLASSIFIED_TYPE    = game_type is present but not a recognised value.
+# These are surfaced under their own labels and, like EXCLUDED, are omitted from
+# the HIGH-vs-LOW gaming split ONLY. They still contribute to every non-gaming
+# analysis (H1 power, H3 RT), which never uses the gaming factor.
+#
+# The category constants below are the single source of truth for these labels.
 # Thresholds live here as config (surfaced in the How-it-works tab, never as
 # inline UI literals). High side is inclusive at 5, low side inclusive at 4;
 # the 4<x<5 gap belongs to EXCLUDED.
@@ -84,6 +95,32 @@ GAMING_HOURS_LOW = 4.0    # avg AND week hours must both be <= this for LOW
 # verbatim questionnaire strings still match. game_type is NOT considered for
 # LOW.
 GAMING_TYPE_HIGH_PREFIXES = ("fast-paced", "both")
+
+# game_type values that are recognised but do NOT qualify HIGH (slower-paced, or
+# "I don't play games"). A game_type that matches neither the HIGH nor the
+# non-qualifying set is *unrecognised* — the participant is flagged unclassified
+# rather than guessed into a bucket. The apostrophe variants cover the mojibake
+# ("I don\u2019t" / "I don\ufffdt") seen in the Windows-1252 export.
+GAMING_TYPE_LOW_PREFIXES = ("slower-paced", "slower paced", "i don")
+
+# Category constants — single source of truth for the gaming labels. HIGH / LOW
+# are the compared groups; the remaining three are each omitted from the
+# HIGH-vs-LOW split but still flow into all non-gaming analyses.
+GAMING_HIGH = "high"
+GAMING_LOW = "low"
+GAMING_EXCLUDED = "excluded"                 # data present, rule places outside both groups
+GAMING_UNCLASSIFIED_MISSING = "unclassified_missing"   # avg/week/type blank or absent
+GAMING_UNCLASSIFIED_TYPE = "unclassified_type"         # game_type present but unrecognised
+
+# The categories that are statistically part of the HIGH-vs-LOW comparison.
+# Everything not in this set contributes zero to the split's figures and N.
+GAMING_COMPARED = (GAMING_HIGH, GAMING_LOW)
+
+# Ordered list of every category the payload/UI may report.
+GAMING_CATEGORIES = (
+    GAMING_HIGH, GAMING_LOW, GAMING_EXCLUDED,
+    GAMING_UNCLASSIFIED_MISSING, GAMING_UNCLASSIFIED_TYPE,
+)
 
 
 def _gaming_hours_value(value: Optional[str]) -> Optional[float]:
@@ -108,12 +145,124 @@ def _gaming_hours_value(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def _gaming_type_is_high(value: Optional[str]) -> bool:
-    """True when game_type qualifies HIGH membership (fast-paced or 'both')."""
-    if not value:
-        return False
+def gaming_type_class(value: Optional[str]) -> str:
+    """Classify a game_type string as 'high' / 'low' / 'missing' / 'unrecognised'.
+
+    'high'        → fast-paced / both (qualifies HIGH membership).
+    'low'         → slower-paced / "I don't play games" (recognised, non-qualifying).
+    'missing'     → blank / absent.
+    'unrecognised'→ present but matches no known value (flag; never guessed).
+
+    Matching is case-insensitive by prefix and tolerates the Windows-1252
+    mojibake in the export (e.g. "I don\ufffdt play games").
+    """
+    if value is None:
+        return "missing"
     v = str(value).strip().lower()
-    return any(v.startswith(p) for p in GAMING_TYPE_HIGH_PREFIXES)
+    if not v:
+        return "missing"
+    if any(v.startswith(p) for p in GAMING_TYPE_HIGH_PREFIXES):
+        return "high"
+    if any(v.startswith(p) for p in GAMING_TYPE_LOW_PREFIXES):
+        return "low"
+    return "unrecognised"
+
+
+def _fmt_threshold(x: float) -> str:
+    """Render a threshold without a trailing '.0' (5.0 -> '5', 4.5 -> '4.5')."""
+    return str(int(x)) if float(x).is_integer() else str(x)
+
+
+def gaming_classification(
+    avg_hours: Optional[str],
+    week_hours: Optional[str],
+    game_type: Optional[str],
+) -> dict:
+    """Classify one participant's gaming exposure with a transparency reason.
+
+    Applies the fixed a-priori rule to the three verbatim questionnaire values
+    and returns a dict:
+        {
+          "category": one of GAMING_CATEGORIES,
+          "reason":   human-readable clause that fired (§2 transparency),
+          "avg_hours": parsed float or None,
+          "week_hours": parsed float or None,
+          "game_type": the raw game_type string (or None),
+        }
+
+    The rule is sample-independent — it depends only on this participant's own
+    values, so it yields the same answer regardless of who else is loaded.
+
+    Completeness is checked first: a blank/absent hours or game_type field means
+    the participant cannot be classified (UNCLASSIFIED_MISSING), never silently
+    defaulted. A present-but-unrecognised game_type is flagged
+    (UNCLASSIFIED_TYPE) rather than guessed into a bucket. EXCLUDED is reserved
+    for participants whose data is complete and recognised but whom the rule
+    deliberately places in neither HIGH nor LOW.
+    """
+    avg = _gaming_hours_value(avg_hours)
+    week = _gaming_hours_value(week_hours)
+    tclass = gaming_type_class(game_type)
+    hi = _fmt_threshold(GAMING_HOURS_HIGH)
+    lo = _fmt_threshold(GAMING_HOURS_LOW)
+    gt_disp = (str(game_type).strip() if game_type else "")
+
+    def result(category: str, reason: str) -> dict:
+        return {
+            "category": category,
+            "reason": reason,
+            "avg_hours": avg,
+            "week_hours": week,
+            "game_type": (str(game_type) if game_type is not None else None),
+        }
+
+    # ── Completeness first — cannot classify on incomplete data (§5) ──
+    missing = []
+    if avg is None:
+        missing.append("avg hours")
+    if week is None:
+        missing.append("past-week hours")
+    if tclass == "missing":
+        missing.append("game type")
+    if missing:
+        return result(
+            GAMING_UNCLASSIFIED_MISSING,
+            "unclassified — missing gaming data (" + ", ".join(missing) + ")",
+        )
+
+    # ── Unrecognised game type — flag, never guess (§5) ──
+    if tclass == "unrecognised":
+        return result(
+            GAMING_UNCLASSIFIED_TYPE,
+            f"unclassified — unrecognised game type ({gt_disp})",
+        )
+
+    # ── HIGH: both hours >= high threshold AND a qualifying game type ──
+    if avg >= GAMING_HOURS_HIGH and week >= GAMING_HOURS_HIGH and tclass == "high":
+        return result(
+            GAMING_HIGH,
+            f"HIGH — hours \u2265{hi} on both; game type qualifies ({gt_disp})",
+        )
+
+    # ── LOW: both hours <= low threshold (game type not considered) ──
+    if avg <= GAMING_HOURS_LOW and week <= GAMING_HOURS_LOW:
+        return result(GAMING_LOW, f"LOW — hours \u2264{lo} on both")
+
+    # ── EXCLUDED — complete, recognised, but the rule places outside both ──
+    hi_avg = avg >= GAMING_HOURS_HIGH
+    hi_week = week >= GAMING_HOURS_HIGH
+    if hi_avg and hi_week and tclass == "low":
+        reason = f"EXCLUDED — hours qualify but game type is non-qualifying ({gt_disp})"
+    elif hi_avg and not hi_week:
+        reason = (f"EXCLUDED — avg \u2265{hi} but past-week \u2264{lo} "
+                  "(inconsistent hours)")
+    elif hi_week and not hi_avg:
+        reason = (f"EXCLUDED — past-week \u2265{hi} but avg \u2264{lo} "
+                  "(inconsistent hours)")
+    else:
+        reason = (f"EXCLUDED — hours between {lo} and {hi} on a measure "
+                  "(neither gate)")
+    return result(GAMING_EXCLUDED, reason)
 
 
 def gaming_category(
@@ -121,32 +270,12 @@ def gaming_category(
     week_hours: Optional[str],
     game_type: Optional[str],
 ) -> str:
-    """Classify one participant's gaming exposure (Tier 3 / H2 & H4).
+    """Category string only — convenience wrapper over gaming_classification().
 
-    Applies the fixed rule above to the three verbatim questionnaire values.
-    Returns one of: "high", "low", "excluded".
-
-    "excluded" means excluded from the H2/H4 gaming comparison specifically —
-    the participant is still shown in Tier 3 under its own labelled category,
-    never silently merged into LOW or dropped.
+    Returns one of GAMING_CATEGORIES. Prefer gaming_classification() when the
+    per-participant transparency reason is also needed.
     """
-    avg = _gaming_hours_value(avg_hours)
-    week = _gaming_hours_value(week_hours)
-
-    # HIGH: both hours measures at/above the high threshold AND a qualifying
-    # game type. Missing hours (None) never satisfies >=.
-    if (avg is not None and week is not None
-            and avg >= GAMING_HOURS_HIGH and week >= GAMING_HOURS_HIGH
-            and _gaming_type_is_high(game_type)):
-        return "high"
-
-    # LOW: both hours measures at/below the low threshold (game type ignored).
-    if (avg is not None and week is not None
-            and avg <= GAMING_HOURS_LOW and week <= GAMING_HOURS_LOW):
-        return "low"
-
-    # Everything else — one-sided, high-hours-but-wrong-type, or the 4<x<5 gap.
-    return "excluded"
+    return gaming_classification(avg_hours, week_hours, game_type)["category"]
 
 
 def handedness_category(value: Optional[str]) -> str:

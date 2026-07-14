@@ -45,8 +45,10 @@ from pipeline import (
 from demographics import (
     Demographic, DISPLAY_FIELDS,
     parse_demographics, match_demographics, parse_filename_ids,
-    handedness_category, gaming_category,
+    handedness_category, gaming_category, gaming_classification,
     GAMING_HOURS_HIGH, GAMING_HOURS_LOW, GAMING_TYPE_HIGH_PREFIXES,
+    GAMING_TYPE_LOW_PREFIXES, GAMING_CATEGORIES, GAMING_COMPARED,
+    GAMING_UNCLASSIFIED_MISSING, GAMING_UNCLASSIFIED_TYPE,
 )
 from behavioural import (
     BehaviouralSession, AlignmentResult,
@@ -509,16 +511,30 @@ def _gaming_of(filename: str) -> str:
 
     Resolves the participant's demographics row and applies the a-priori gaming
     classification rule to the three questionnaire fields (avg hours, past-week
-    hours, game type). Returns 'high' / 'low' / 'excluded'; 'unknown' when
-    demographics are absent or unmatched. Derived from the data every call —
-    never a stored roster.
+    hours, game type). Returns a value in GAMING_CATEGORIES, or 'unknown' when
+    the participant has no matched demographics row at all (distinct from
+    'unclassified_*', which means the row exists but its gaming data is
+    missing/unrecognised). Derived from the data every call — never a roster.
+    """
+    return _gaming_class_of(filename)["category"]
+
+
+def _gaming_class_of(filename: str) -> dict:
+    """Full gaming classification for a recording — category + §2 reason.
+
+    Returns the dict from ``gaming_classification`` augmented so callers always
+    get a ``category``/``reason``. When no demographics row matches at all the
+    category is 'unknown' (not 'unclassified_*', which is reserved for a matched
+    row whose gaming fields are missing/unrecognised).
     """
     if not _demographics:
-        return "unknown"
+        return {"category": "unknown", "reason": "no demographics loaded",
+                "avg_hours": None, "week_hours": None, "game_type": None}
     demo = match_demographics(filename, _demographics)
     if demo is None:
-        return "unknown"
-    return gaming_category(
+        return {"category": "unknown", "reason": "no matched demographics row",
+                "avg_hours": None, "week_hours": None, "game_type": None}
+    return gaming_classification(
         demo.display.get("games_hours_week"),
         demo.display.get("games_last_week"),
         demo.display.get("game_type"),
@@ -575,6 +591,85 @@ def _measure_trial_included(t: TrialResult, spec: dict) -> bool:
     if spec["value_attr"] == "rt_ms":
         return t.rt_ms is not None and t.rt_ms > 0
     return not bool(getattr(t, spec["exclude_attr"]))
+
+
+def _descriptive_stats(diffs: List[float]) -> dict:
+    """Descriptive summary of a set of per-participant difference scores.
+
+    Mean, median, SD and a 95% CI of the mean — NO test statistic, NO p-value.
+    Used for the Tier-3 HIGH-vs-LOW gaming picture, which is intentionally
+    DESCRIPTIVE only: H2/H4 are interaction hypotheses whose authoritative
+    inferential test (2×2 mixed ANOVA / independent t on difference scores) is
+    run in SPSS, so the app never emits a p-value that could disagree with it.
+    """
+    arr = np.asarray([d for d in diffs if d is not None], dtype=float)
+    n = int(arr.size)
+    out = {"n": n, "mean_diff": None, "median_diff": None,
+           "sd_diff": None, "ci95_lo": None, "ci95_hi": None}
+    if n == 0:
+        return out
+    mean = float(np.mean(arr))
+    out["mean_diff"] = mean
+    out["median_diff"] = float(np.median(arr))
+    if n >= 2:
+        sd = float(np.std(arr, ddof=1))
+        out["sd_diff"] = sd
+        sem = sd / math.sqrt(n)
+        try:
+            from scipy import stats as _stats
+            tcrit = float(_stats.t.ppf(0.975, n - 1))
+        except Exception:
+            tcrit = 1.96
+        out["ci95_lo"] = mean - tcrit * sem
+        out["ci95_hi"] = mean + tcrit * sem
+    return out
+
+
+def _gaming_split_descriptive(participants: List[dict], dp: int) -> dict:
+    """DESCRIPTIVE HIGH-vs-LOW comparison of the refresh difference scores.
+
+    H2/H4 are INTERACTION hypotheses: does the 165−60 (high−low) difference
+    differ between gaming groups. The correct between-groups quantity is
+    therefore each participant's PER-PARTICIPANT DIFFERENCE SCORE (high − low),
+    compared HIGH vs LOW — never the raw condition means (which would test a
+    main effect of group, the wrong hypothesis).
+
+    Only HIGH and LOW contribute. EXCLUDED and the two 'unclassified_*' buckets
+    (and any 'unknown') contribute ZERO to these figures and Ns — statistical
+    omission, not mere greying. Adding/removing an EXCLUDED participant does not
+    move any number here.
+
+    Descriptive only (mean/median/SD/95% CI + N per group); no test statistic,
+    no p-value. The authoritative interaction test lives in SPSS.
+    """
+    groups = {}
+    for cat in GAMING_COMPARED:   # ("high", "low")
+        diffs_median = [
+            p["diff_median"] for p in participants
+            if p.get("gaming") == cat and p.get("has_both")
+            and p.get("diff_median") is not None
+        ]
+        diffs_mean = [
+            p["diff_mean"] for p in participants
+            if p.get("gaming") == cat and p.get("has_both")
+            and p.get("diff_mean") is not None
+        ]
+        gmed = _descriptive_stats(diffs_median)
+        gmn = _descriptive_stats(diffs_mean)
+        for st in (gmed, gmn):
+            for k in ("mean_diff", "median_diff", "sd_diff", "ci95_lo", "ci95_hi"):
+                if st.get(k) is not None:
+                    st[k] = round(st[k], dp)
+        groups[cat] = {"from_medians": gmed, "from_means": gmn}
+    return {
+        "groups": groups,
+        "compared": list(GAMING_COMPARED),
+        "descriptive_only": True,
+        "note": ("Descriptive between-groups picture on per-participant 165−60 "
+                 "difference scores. HIGH vs LOW only; EXCLUDED and unclassified "
+                 "omitted from these figures. Authoritative H2/H4 interaction "
+                 "test (mixed ANOVA) is run in SPSS."),
+    }
 
 
 def _group_stats(diffs: List[float]) -> dict:
@@ -701,11 +796,16 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
         if not _in_handedness_subset(r.filename, subset):
             continue
         hz_map = _block_hz_map(r.filename)
+        gaming_cls = _gaming_class_of(r.filename)
         entry = {
             "result_id": rid,
             "filename": r.filename,
             "handedness": _handedness_of(r.filename),
-            "gaming": _gaming_of(r.filename),
+            "gaming": gaming_cls["category"],
+            "gaming_reason": gaming_cls["reason"],
+            "gaming_avg_hours": gaming_cls["avg_hours"],
+            "gaming_week_hours": gaming_cls["week_hours"],
+            "gaming_type": gaming_cls["game_type"],
             "demographics": _refresh_demo_of(r.filename),
             "has_both": False,
             "conditions": {},     # hz_label -> {median, mean, n, trials:[...]}
@@ -914,6 +1014,7 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
         "participants": participants,
         "group": group,
         "group_from_means": group_from_means,
+        "gaming_split": _gaming_split_descriptive(participants, dp),
         "apriori": apriori_stats,
         "provenance": _measure_provenance(measure_key, low, high),
     }
@@ -2073,8 +2174,11 @@ async def refresh_comparison(handedness: str = "all"):
         hand_counts[_handedness_of(r.filename)] += 1
     # Gaming-exposure census across ALL loaded participants (Tier 3 / H2 & H4).
     # Derived from questionnaire data via the a-priori gaming rule; never a
-    # stored roster. 'excluded' is a visible category, not a silent drop.
-    gaming_counts = {"high": 0, "low": 0, "excluded": 0, "unknown": 0}
+    # stored roster. Only HIGH and LOW are compared (H2/H4); EXCLUDED and the
+    # two 'unclassified_*' buckets are visible categories omitted from the
+    # split, not silent drops. 'unknown' = no matched demographics row at all.
+    gaming_counts = {c: 0 for c in GAMING_CATEGORIES}
+    gaming_counts["unknown"] = 0
     for r in _results.values():
         gaming_counts[_gaming_of(r.filename)] += 1
     return {
@@ -2085,10 +2189,12 @@ async def refresh_comparison(handedness: str = "all"):
         "handedness_subset": subset,
         "handedness_counts": hand_counts,
         "gaming_counts": gaming_counts,
+        "gaming_compared": list(GAMING_COMPARED),
         "gaming_config": {
             "hours_high": GAMING_HOURS_HIGH,
             "hours_low": GAMING_HOURS_LOW,
             "type_high_prefixes": list(GAMING_TYPE_HIGH_PREFIXES),
+            "type_low_prefixes": list(GAMING_TYPE_LOW_PREFIXES),
         },
         "apriori_config": apriori.config(),
     }

@@ -2024,6 +2024,25 @@ footer p {
 .t3-stat { display: inline-flex; align-items: center; gap: 0.4rem; }
 .t3-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .t3-stat .rr-n { color: var(--text-dim); font-size: 0.64rem; }
+.t3-omitted {
+    flex-basis: 100%;
+    color: var(--text-dim);
+    font-size: 0.66rem;
+    font-style: italic;
+}
+.t3-descriptive-note {
+    flex-basis: 100%;
+    color: var(--text-dim);
+    font-size: 0.64rem;
+    margin-top: 0.15rem;
+}
+/* §2 transparency — gaming reason column + omitted styling in Tier-5 table */
+.t5-gaming-why {
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    max-width: 22rem;
+}
+.t5-gaming-omitted { opacity: 0.6; font-style: italic; }
 
 /* Tier 4 — validity */
 .t4-measure { margin-bottom: 1.2rem; }

@@ -2265,17 +2265,25 @@ const HANDEDNESS_LABELS = {
 };
 
 // Colours + labels for the gaming-exposure categories (Tier 3 / H2 & H4).
-// EXCLUDED is deliberately muted-but-visible — it is its own category, never
-// merged into LOW.
+// Only HIGH and LOW are compared; EXCLUDED and the two 'unclassified_*' buckets
+// are muted-but-visible — each its own category, never merged into LOW.
 const GAMING_COLORS = {
     high: '#f472b6',
     low: '#5eead4',
     excluded: '#a1a1c0',
+    unclassified_missing: '#8a8fb0',
+    unclassified_type: '#b0a08a',
     unknown: '#6b7394',
 };
 const GAMING_LABELS = {
-    high: 'High', low: 'Low', excluded: 'Excluded', unknown: 'Unknown',
+    high: 'High', low: 'Low', excluded: 'Excluded',
+    unclassified_missing: 'Unclassified (missing data)',
+    unclassified_type: 'Unclassified (unrecognised type)',
+    unknown: 'Unknown',
 };
+// Categories that participate in the HIGH-vs-LOW comparison. Everything else is
+// visible but statistically omitted from the split.
+const GAMING_COMPARED = ['high', 'low'];
 
 async function showRefreshComparison() {
     let data;
@@ -2442,16 +2450,25 @@ function renderTier3Gaming(data) {
     if (noteEl) {
         const hoursHigh = cfg.hours_high, hoursLow = cfg.hours_low;
         const types = (cfg.type_high_prefixes || []).join(' / ');
+        const extra = [];
+        if (counts.unclassified_missing) extra.push(`${counts.unclassified_missing} unclassified (missing data)`);
+        if (counts.unclassified_type) extra.push(`${counts.unclassified_type} unclassified (unrecognised type)`);
+        if (counts.unknown) extra.push(`${counts.unknown} unknown`);
         noteEl.innerHTML = `The same per-participant differences, split by an
             <strong>a-priori</strong> gaming-exposure rule (derived from the
             questionnaire, not a roster). <strong>HIGH</strong> = avg ≥ ${hoursHigh}
             <em>and</em> past-week ≥ ${hoursHigh} hours <em>and</em> game type in
             {${escapeHtml(types)}}; <strong>LOW</strong> = avg ≤ ${hoursLow}
             <em>and</em> past-week ≤ ${hoursLow} hours (type ignored);
-            <strong>EXCLUDED</strong> = everyone else (shown, never merged).
-            Census: ${counts.high || 0} high / ${counts.low || 0} low /
-            ${counts.excluded || 0} excluded${counts.unknown ? ' / ' + counts.unknown + ' unknown' : ''}.
-            H2/H4 compare HIGH vs LOW.`;
+            <strong>EXCLUDED</strong> = data present but the rule places them in
+            neither group; <strong>unclassified</strong> = gaming data missing or
+            unrecognised. Every non-HIGH/LOW category is shown but
+            <em>statistically omitted</em> from the HIGH-vs-LOW comparison, never
+            merged. Census: ${counts.high || 0} high / ${counts.low || 0} low /
+            ${counts.excluded || 0} excluded${extra.length ? ' / ' + extra.join(' / ') : ''}.
+            H2/H4 compare HIGH vs LOW on the per-participant 60→165 difference
+            scores. The comparison below is <strong>descriptive only</strong> — the
+            authoritative interaction test (mixed ANOVA) is run in SPSS.`;
     }
 
     const measures = data.measures || [];
@@ -2489,6 +2506,7 @@ function drawGamingSplit(m) {
     const traces = complete.map(p => {
         const cat = p.gaming || 'unknown';
         const colour = GAMING_COLORS[cat] || GAMING_COLORS.unknown;
+        const compared = GAMING_COMPARED.includes(cat);
         const showLegend = !seen.has(cat);
         if (showLegend) seen.add(cat);
         return {
@@ -2497,9 +2515,9 @@ function drawGamingSplit(m) {
             legendgroup: cat, showlegend: showLegend,
             x: xLabels,
             y: [p.conditions[m.rate_low][a], p.conditions[m.rate_high][a]],
-            line: { color: colour, width: 1.6, dash: cat === 'excluded' ? 'dot' : 'solid' },
+            line: { color: colour, width: 1.6, dash: compared ? 'solid' : 'dot' },
             marker: { color: colour, size: 6 },
-            opacity: cat === 'excluded' ? 0.4 : 0.85,
+            opacity: compared ? 0.85 : 0.4,
             hovertemplate: `${escapeHtml(p.filename)} (${GAMING_LABELS[cat] || 'Unknown'})<br>%{x} (${a}): %{y}<extra></extra>`,
         };
     });
@@ -2513,23 +2531,35 @@ function drawGamingSplit(m) {
 
     if (statsEl) {
         const dp = m.decimals;
-        const groupMean = (cat) => {
-            const diffs = complete
-                .filter(p => (p.gaming || 'unknown') === cat)
-                .map(p => a === 'mean' ? p.diff_mean : p.diff_median)
-                .filter(v => v != null);
-            if (!diffs.length) return null;
-            return diffs.reduce((s, v) => s + v, 0) / diffs.length;
-        };
+        // DESCRIPTIVE HIGH-vs-LOW on the per-participant 60→165 difference
+        // scores (H2/H4 interaction quantity), computed server-side over HIGH
+        // and LOW only — EXCLUDED / unclassified contribute zero here. No
+        // p-value: the authoritative test is run in SPSS.
+        const split = (m.gaming_split && m.gaming_split.groups) || {};
+        const useMean = (a === 'mean');
         const mk = (cat) => {
-            const v = groupMean(cat);
-            const n = complete.filter(p => (p.gaming || 'unknown') === cat).length;
+            const g = split[cat] ? (useMean ? split[cat].from_means : split[cat].from_medians) : null;
+            const central = g ? (useMean ? g.mean_diff : g.median_diff) : null;
+            const n = g ? g.n : 0;
+            const sd = g ? g.sd_diff : null;
+            const lo = g ? g.ci95_lo : null, hi = g ? g.ci95_hi : null;
+            const label = useMean ? 'mean Δ' : 'median Δ';
+            const ci = (useMean && lo != null && hi != null)
+                ? ` · 95% CI [${fmtNum(lo, dp)}, ${fmtNum(hi, dp)}]` : '';
+            const sdTxt = (useMean && sd != null) ? ` · SD ${fmtNum(sd, dp)}` : '';
             return `<span class="t3-stat t3-${cat}">
                 <span class="t3-dot" style="background:${GAMING_COLORS[cat]}"></span>
-                ${GAMING_LABELS[cat]}: ${v == null ? '—' : (v > 0 ? '+' : '') + fmtNum(v, dp)}
-                <span class="rr-n">mean Δ, n=${n}</span></span>`;
+                ${GAMING_LABELS[cat]}: ${central == null ? '—' : (central > 0 ? '+' : '') + fmtNum(central, dp)}
+                <span class="rr-n">${label}, n=${n}${sdTxt}${ci}</span></span>`;
         };
-        statsEl.innerHTML = mk('high') + mk('low') + mk('excluded');
+        // Count how many complete participants are shown but omitted from the
+        // HIGH-vs-LOW figures.
+        const omitted = complete.filter(p => !GAMING_COMPARED.includes(p.gaming || 'unknown')).length;
+        const omittedTxt = omitted
+            ? `<span class="t3-omitted">${omitted} shown but omitted from HIGH-vs-LOW (excluded / unclassified)</span>`
+            : '';
+        statsEl.innerHTML = mk('high') + mk('low') + omittedTxt +
+            `<div class="t3-descriptive-note">Descriptive only — authoritative H2/H4 interaction test in SPSS.</div>`;
     }
 }
 
@@ -2624,12 +2654,23 @@ function renderTier5Sample(data) {
         const bo = d.block_order || {};
         const blockOrder = (bo['1'] || bo['2'])
             ? `${bo['1'] || '?'} / ${bo['2'] || '?'}` : '—';
+        // §2 transparency: show the gaming category AND the clause that fired,
+        // plus the raw values behind it, so the rule is verifiable one
+        // participant at a time on whatever data is loaded.
+        const gAvg = (p.gaming_avg_hours != null) ? p.gaming_avg_hours : '—';
+        const gWk = (p.gaming_week_hours != null) ? p.gaming_week_hours : '—';
+        const gType = p.gaming_type ? escapeHtml(p.gaming_type) : '—';
+        const reason = p.gaming_reason ? escapeHtml(p.gaming_reason) : '';
+        const compared = GAMING_COMPARED.includes(p.gaming);
         return `<tr>
             <td>${escapeHtml(p.filename)}</td>
             <td>${escapeHtml(d.age || '—')}</td>
             <td>${escapeHtml(d.sex || '—')}</td>
             <td>${escapeHtml(HANDEDNESS_LABELS[p.handedness] || '—')}</td>
-            <td>${escapeHtml(GAMING_LABELS[p.gaming] || '—')}</td>
+            <td class="${compared ? '' : 't5-gaming-omitted'}"
+                title="avg ${gAvg} h/wk · past-week ${gWk} h · type: ${gType}">
+                ${escapeHtml(GAMING_LABELS[p.gaming] || '—')}</td>
+            <td class="t5-gaming-why">${reason || '—'}</td>
             <td>${escapeHtml(blockOrder)}</td>
         </tr>`;
     }).join('');
@@ -2647,9 +2688,9 @@ function renderTier5Sample(data) {
                 <table class="compare-table">
                     <thead><tr>
                         <th>Participant</th><th>Age</th><th>Sex</th>
-                        <th>Handedness</th><th>Gaming</th><th>Block order</th>
+                        <th>Handedness</th><th>Gaming</th><th>Gaming — why</th><th>Block order</th>
                     </tr></thead>
-                    <tbody>${demoRows || '<tr><td colspan="6">No participants loaded.</td></tr>'}</tbody>
+                    <tbody>${demoRows || '<tr><td colspan="7">No participants loaded.</td></tr>'}</tbody>
                 </table>
             </div>
         </div>`;
