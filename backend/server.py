@@ -176,6 +176,9 @@ def _summary_payload(r: PipelineResult, include_amplitude: bool = False) -> dict
             "burst_z": BURST_Z,
             "burst_impact": BURST_IMPACT,
             "coinc_z": COINC_Z,
+            # A-priori inclusion floor (apriori.py), surfaced so the individual
+            # view can grey per-condition cells below it without hard-coding.
+            "apriori_floor_min_trials": apriori.FLOOR_MIN_TRIALS,
         },
     }
 
@@ -522,6 +525,32 @@ def _gaming_of(filename: str) -> str:
     )
 
 
+def _refresh_demo_of(filename: str) -> dict:
+    """Compact demographics for the group view's Tier-5 table and Tier-6
+    correlations (age, sex, block order). Numeric ``age`` is parsed for the
+    correlation; ``None`` when absent/unparseable. Never a stored roster —
+    resolved from the matched demographics row each call.
+    """
+    out = {"age": None, "age_num": None, "sex": None, "block_order": {}}
+    if not _demographics:
+        return out
+    demo = match_demographics(filename, _demographics)
+    if demo is None:
+        return out
+    age_raw = demo.display.get("age")
+    out["age"] = age_raw or None
+    if age_raw:
+        m = re.search(r"-?\d+(?:\.\d+)?", str(age_raw))
+        if m:
+            try:
+                out["age_num"] = float(m.group(0))
+            except ValueError:
+                pass
+    out["sex"] = demo.display.get("sex") or None
+    out["block_order"] = {str(k): v for k, v in demo.block_order.items()}
+    return out
+
+
 # The handedness subsets the group view can restrict to. Each maps to the set of
 # categories that are KEPT. 'all' keeps everyone (including unknown); the split
 # is reveal-only — it recomputes group stats over the subset, never adjusts data.
@@ -677,6 +706,7 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
             "filename": r.filename,
             "handedness": _handedness_of(r.filename),
             "gaming": _gaming_of(r.filename),
+            "demographics": _refresh_demo_of(r.filename),
             "has_both": False,
             "conditions": {},     # hz_label -> {median, mean, n, trials:[...]}
             "diff": None,         # primary (median-based) high−low
@@ -822,6 +852,19 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
         def _cell_median(rate, cond):
             vals = by_cell.get((rate, cond))
             return float(np.median(vals)) if vals else None
+
+        # Congruency effect (Tier 4 validity / manipulation check): the
+        # incongruent − congruent contrast per participant, pooled across both
+        # refresh rates (all incongruent survivors vs all congruent survivors).
+        # Reported/flagged only; never withheld and never excludes anything
+        # (apriori.py). Median-based to match the primary statistic. None when a
+        # side has no surviving trials.
+        inc_all = (by_cell.get((low, "first"), []) + by_cell.get((high, "first"), []))
+        con_all = (by_cell.get((low, "con"), []) + by_cell.get((high, "con"), []))
+        entry["congruency_effect"] = (
+            round(float(np.median(inc_all)) - float(np.median(con_all)), dp)
+            if inc_all and con_all else None
+        )
 
         # Incongruent (primary): included only when its comparison passes.
         if low and high and ap["incongruent"]["passes"]:

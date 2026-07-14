@@ -298,7 +298,7 @@ function initUpload() {
                     showResults(lastData);
                 } else {
                     document.getElementById('upload-section').hidden = true;
-                    showComparison();
+                    showRefreshComparison();
                 }
             }, 500);
             return;
@@ -341,7 +341,7 @@ function initUpload() {
                 else loadSubject(uploadedSubjects[0].result_id);
             } else {
                 document.getElementById('upload-section').hidden = true;
-                showComparison();
+                showRefreshComparison();
             }
         };
 
@@ -901,7 +901,6 @@ function showResults(data) {
     document.getElementById('upload-section').hidden = true;
     document.getElementById('results-section').hidden = false;
     document.getElementById('refresh-section').hidden = true;
-    document.getElementById('compare-section').hidden = true;
 
     // Info bar
     document.getElementById('info-filename').textContent = s.filename;
@@ -1103,6 +1102,13 @@ function setCard(prefix, band, demographics) {
     }
     const blockOrder = (demographics && demographics.block_order) || {};
     const hasRefresh = blockKeys.some(k => blockOrder[k]);
+    // A-priori inclusion floor (apriori.py), surfaced by the backend in the
+    // individual payload's config. A per-condition cell (block × congruency)
+    // with fewer surviving trials than this floor is greyed with a note: it is
+    // below the pre-registered minimum and would be withheld from the group
+    // contrast. Never hard-coded here.
+    const floor = (currentData && currentData.summary && currentData.summary.config
+        && currentData.summary.config.apriori_floor_min_trials) || null;
     // Label mode: 'refresh' shows "60 Hz block" (default when demographics known),
     // 'block' shows "Block 1/2" for validity checking. Toggle lives in the header.
     const mode = hasRefresh ? powerBlockLabelMode : 'block';
@@ -1134,20 +1140,33 @@ function setCard(prefix, band, demographics) {
             const incMainStr = amp ? `${incMain.toFixed(2)} µV` : incMain.toFixed(3);
             const conSec = amp ? '' : `abs ${b.abs_median_con.toFixed(2)}`;
             const incSec = amp ? '' : `abs ${b.abs_median_inc.toFixed(2)}`;
+            // Grey a cell below the a-priori floor (too few surviving trials to
+            // contribute to the group contrast). RT is never channel-excluded,
+            // but the same per-cell floor is shown here for the power cards.
+            const conLow = floor != null && b.n_surv_con < floor;
+            const incLow = floor != null && b.n_surv_inc < floor;
+            const conFloorTag = conLow
+                ? `<span class="cell-below-floor" title="Only ${b.n_surv_con} surviving trials — below the a-priori floor of ${floor}; withheld from the group contrast">below floor</span>`
+                : '';
+            const incFloorTag = incLow
+                ? `<span class="cell-below-floor" title="Only ${b.n_surv_inc} surviving trials — below the a-priori floor of ${floor}; withheld from the group contrast">below floor</span>`
+                : '';
             return `
                 <div class="card-block-row">
                     <div class="card-block-label">${label}</div>
                     <div class="card-block-values">
-                        <div class="val-group congruent">
+                        <div class="val-group congruent${conLow ? ' cell-greyed' : ''}">
                             <span class="val-label">Con</span>
                             <span class="val-number">${conMainStr}</span>
                             <span class="val-secondary">${conSec}</span>
+                            ${conFloorTag}
                         </div>
                         <div class="val-divider"></div>
-                        <div class="val-group incongruent">
+                        <div class="val-group incongruent${incLow ? ' cell-greyed' : ''}">
                             <span class="val-label">Inc</span>
                             <span class="val-number">${incMainStr}</span>
                             <span class="val-secondary">${incSec}</span>
+                            ${incFloorTag}
                         </div>
                     </div>
                     <div class="card-block-bar">
@@ -2189,7 +2208,7 @@ async function loadSubject(resultId) {
             return;
         }
         const data = await resp.json();
-        document.getElementById('compare-section').hidden = true;
+        document.getElementById('refresh-section').hidden = true;
         document.getElementById('upload-section').hidden = true;
         showResults(data);
     } catch (err) {
@@ -2201,172 +2220,13 @@ function updateCompareButton() {
     const btn = document.getElementById('btn-compare');
     btn.disabled = uploadedSubjects.length < 2;
     btn.textContent = uploadedSubjects.length < 2
-        ? 'Compare Participants'
-        : `Compare ${uploadedSubjects.length} Participants`;
-}
-
-// ── Group comparison ──
-async function showComparison() {
-    try {
-        const resp = await fetch(`${API}/api/compare`);
-        if (!resp.ok) {
-            const err = await resp.json();
-            alert(err.detail || 'Comparison failed');
-            return;
-        }
-        const data = await resp.json();
-        const subjects = data.subjects;
-
-        document.getElementById('results-section').hidden = true;
-        document.getElementById('compare-section').hidden = false;
-        document.getElementById('upload-section').hidden = true;
-        document.getElementById('refresh-section').hidden = true;
-        saveSession({ view: 'compare' });
-
-        // Table
-        const thead = document.querySelector('#compare-table thead');
-        const tbody = document.querySelector('#compare-table tbody');
-        // Only show demographic columns if at least one subject has a match
-        const anyDemo = subjects.some(s => s.summary.demographics && s.summary.demographics.matched);
-        const demoCols = anyDemo
-            ? '<th>Age</th><th>Sex</th><th>Hand</th><th>Block order</th>'
-            : '';
-        thead.innerHTML = `<tr>
-            <th></th><th>Participant</th><th>Date</th>
-            ${demoCols}
-            <th>θ rel con</th><th>θ rel inc</th><th>θ Δ</th>
-            <th>β rel con</th><th>β rel inc</th>
-            <th>θ surv</th><th>β surv</th>
-        </tr>`;
-        tbody.innerHTML = subjects.map((subj, i) => {
-            const s = subj.summary;
-            const dTheta = s.theta.rel_median_inc - s.theta.rel_median_con;
-            const dcol = dTheta > 0 ? 'val-inc' : 'val-con';
-            const balTh = s.theta.balance_flag ? ' ⚠' : '';
-            const balBe = s.beta.balance_flag ? ' ⚠' : '';
-            let demoTds = '';
-            if (anyDemo) {
-                const d = s.demographics || {};
-                const findField = (key) => (d.fields || []).find(f => f.key === key)?.value || '';
-                const bo = d.block_order || {};
-                const blockOrder = (bo['1'] || bo['2'])
-                    ? `${bo['1'] || '?'} / ${bo['2'] || '?'}`
-                    : (d.aborted ? 'aborted' : '—');
-                demoTds = `
-                    <td>${escapeHtml(findField('age')) || '—'}</td>
-                    <td>${escapeHtml(findField('sex')) || '—'}</td>
-                    <td>${escapeHtml(findField('handedness')) || '—'}</td>
-                    <td>${escapeHtml(blockOrder)}</td>
-                `;
-            }
-            return `<tr class="compare-row" data-id="${escapeHtml(subj.result_id)}" role="button" tabindex="0" title="View ${escapeHtml(s.filename)}">
-                <td><span class="chip-dot" style="background:${SUBJECT_COLORS[i % SUBJECT_COLORS.length]};display:inline-block;width:8px;height:8px;border-radius:50%"></span></td>
-                <td>${escapeHtml(s.filename)}</td>
-                <td>${escapeHtml(s.recording_date)}</td>
-                ${demoTds}
-                <td class="val-con">${s.theta.rel_median_con.toFixed(3)}</td>
-                <td class="val-inc">${s.theta.rel_median_inc.toFixed(3)}</td>
-                <td class="${dcol}">${dTheta >= 0 ? '+' : ''}${dTheta.toFixed(3)}</td>
-                <td class="val-con">${s.beta.rel_median_con.toFixed(3)}</td>
-                <td class="val-inc">${s.beta.rel_median_inc.toFixed(3)}</td>
-                <td>${s.theta.surviving}/${s.n_trials}${balTh}</td>
-                <td>${s.beta.surviving}/${s.n_trials}${balBe}</td>
-            </tr>`;
-        }).join('');
-
-        // Click a table row → drill into that subject's individual results.
-        tbody.querySelectorAll('.compare-row').forEach(row => {
-            const load = () => { if (row.dataset.id) loadSubject(row.dataset.id); };
-            row.addEventListener('click', load);
-            row.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); load(); }
-            });
-        });
-
-        // Grouped bars: relative power
-        renderGroupedBar('chart-compare-theta', subjects,
-            s => s.summary.theta.rel_median_con, s => s.summary.theta.rel_median_inc,
-            'θ relative power');
-        renderGroupedBar('chart-compare-beta', subjects,
-            s => s.summary.beta.rel_median_con, s => s.summary.beta.rel_median_inc,
-            'β relative power');
-
-        // Exclusion rate stacked chart
-        renderExclusionCompareChart('chart-compare-exclusion', subjects);
-
-        // Congruency effect (θ inc - con)
-        renderEffectChart('chart-compare-effect', subjects);
-
-    } catch (err) {
-        alert('Error loading comparison: ' + err.message);
-    }
-}
-
-function renderGroupedBar(containerId, subjects, conFn, incFn, yLabel) {
-    const names = subjects.map(s => s.summary.filename);
-    const traces = [
-        { x: names, y: subjects.map(conFn), name: 'Congruent',   type: 'bar', marker: { color: CON_COLOR, opacity: 0.85 } },
-        { x: names, y: subjects.map(incFn), name: 'Incongruent', type: 'bar', marker: { color: INC_COLOR, opacity: 0.85 } },
-    ];
-    const layout = {
-        ...plotlyLayout,
-        barmode: 'group', bargap: 0.3, bargroupgap: 0.1,
-        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
-        yaxis: { ...plotlyLayout.yaxis, title: { text: yLabel, font: { size: 10 } } },
-    };
-    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
-}
-
-function renderExclusionCompareChart(containerId, subjects) {
-    const names = subjects.map(s => s.summary.filename);
-    const traces = [
-        {
-            x: names,
-            y: subjects.map(s => 100 * s.summary.theta.excluded / s.summary.n_trials),
-            name: 'θ excl % (Fz-Pz)', type: 'bar',
-            marker: { color: '#5eead4', opacity: 0.85 },
-        },
-        {
-            x: names,
-            y: subjects.map(s => 100 * s.summary.beta.excluded / s.summary.n_trials),
-            name: 'β excl % (C3-C4)', type: 'bar',
-            marker: { color: '#f472b6', opacity: 0.85 },
-        },
-    ];
-    const layout = {
-        ...plotlyLayout,
-        barmode: 'group', bargap: 0.3, bargroupgap: 0.1,
-        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
-        yaxis: { ...plotlyLayout.yaxis, title: { text: '% excluded', font: { size: 10 } }, rangemode: 'tozero' },
-    };
-    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
-}
-
-function renderEffectChart(containerId, subjects) {
-    const names = subjects.map(s => s.summary.filename);
-    const effects = subjects.map(s => s.summary.theta.rel_median_inc - s.summary.theta.rel_median_con);
-    const colors  = effects.map(e => e >= 0 ? INC_COLOR : DIM_COLOR);
-    const traces = [{
-        x: names, y: effects, name: 'θ inc − con',
-        type: 'bar', marker: { color: colors, opacity: 0.85 },
-    }];
-    const layout = {
-        ...plotlyLayout,
-        showlegend: false,
-        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
-        yaxis: {
-            ...plotlyLayout.yaxis,
-            title: { text: 'Δ theta relative power', font: { size: 10 } },
-            zeroline: true, zerolinecolor: 'rgba(255,255,255,0.15)', zerolinewidth: 1,
-        },
-    };
-    Plotly.newPlot(containerId, traces, layout, plotlyConfig);
+        ? 'Group View'
+        : `Group View (${uploadedSubjects.length})`;
 }
 
 // ── Navigation ──
 function goToUpload() {
     document.getElementById('results-section').hidden = true;
-    document.getElementById('compare-section').hidden = true;
     document.getElementById('refresh-section').hidden = true;
     document.getElementById('upload-section').hidden = false;
     document.getElementById('upload-progress').hidden = true;
@@ -2404,6 +2264,19 @@ const HANDEDNESS_LABELS = {
     right: 'Right', left: 'Left', ambidextrous: 'Ambidextrous', unknown: 'Unknown',
 };
 
+// Colours + labels for the gaming-exposure categories (Tier 3 / H2 & H4).
+// EXCLUDED is deliberately muted-but-visible — it is its own category, never
+// merged into LOW.
+const GAMING_COLORS = {
+    high: '#f472b6',
+    low: '#5eead4',
+    excluded: '#a1a1c0',
+    unknown: '#6b7394',
+};
+const GAMING_LABELS = {
+    high: 'High', low: 'Low', excluded: 'Excluded', unknown: 'Unknown',
+};
+
 async function showRefreshComparison() {
     let data;
     try {
@@ -2421,21 +2294,31 @@ async function showRefreshComparison() {
     refreshData = data;
 
     document.getElementById('results-section').hidden = true;
-    document.getElementById('compare-section').hidden = true;
     document.getElementById('upload-section').hidden = true;
     document.getElementById('refresh-section').hidden = false;
     saveSession({ view: 'refresh' });
 
     renderHandednessSubsetNote(data);
 
-    // List subjects excluded from the group stats, with WHY — distinguishing a
-    // benign data gap (safely excluded) from a fixable upstream block/merge fault.
+    // Tier 1 — headline 60-vs-165 result per measure (primary = incongruent,
+    // a-priori N, paired test).
+    renderTier1Headline(data.measures);
+
+    // Tier 2 — paired ("spaghetti") plots + difference-score distribution.
+    renderRefreshMeasures(data.measures);
+
+    // Tier 3 — gaming-group split (H2/H4).
+    renderTier3Gaming(data);
+
+    // Tier 4 — validity check (congruency effect per participant).
+    renderTier4Validity(data.measures);
+
+    // Tier 5 — sample description + per-measure effective N & exclusion picture.
+    renderTier5Sample(data);
     renderRefreshExclusions(data);
 
-    // Side-by-side sample-level averages for all three measures, up top.
-    renderRefreshOverview(data.measures);
-
-    renderRefreshMeasures(data.measures);
+    // Tier 6 — exploratory correlations + sortable table.
+    renderTier6Exploratory(data.measures);
 }
 
 // Show the active handedness subset + the sample's handedness census, so the
@@ -2454,55 +2337,501 @@ function renderHandednessSubsetNote(data) {
     noteEl.textContent = `Active subset: ${subsetLabel} — N=${data.n_subjects} of ${data.n_subjects_total} loaded (sample: ${census}).`;
 }
 
-// Top-of-page overview: the average (mean Δ) difference across the sample for
-// each measure, shown side by side so trends in spectral power and reaction
-// time are visible at a glance. Uses the same group stat as each measure's
-// headline (mean Δ of the per-participant median differences) — never affected
-// by the inspection toggle.
-function renderRefreshOverview(measures) {
-    const el = document.getElementById('refresh-overview');
+// Format a two-sided p-value for display. Backend gives an exact float or null
+// (null when scipy is absent or the difference set has zero variance).
+function fmtP(p) {
+    if (p == null) return 'p —';
+    if (p < 0.001) return 'p < .001';
+    // Strip the leading zero (APA-style) for a compact headline.
+    return 'p = ' + p.toFixed(3).replace(/^0/, '');
+}
+
+// Significance label from a p-value (α = .05). Purely descriptive.
+function sigLabel(p) {
+    if (p == null) return '';
+    return p < 0.05
+        ? '<span class="sig sig-yes">significant</span>'
+        : '<span class="sig sig-no">n.s.</span>';
+}
+
+// ── Tier 1 — Headline ──
+// The 60-vs-165 result for each measure, leading with the a-priori PRIMARY
+// comparison (INCONGRUENT low-vs-high): mean Δ (165 − 60), 95% CI, the
+// per-measure a-priori N, and the paired-test result. The pooled (con+incon)
+// "combined" figure is shown as a secondary line for context. N here is the
+// effective N after the a-priori inclusion rule, and can differ across
+// theta / beta / RT because of channel exclusions.
+function renderTier1Headline(measures) {
+    const el = document.getElementById('tier1-headline');
     if (!el) return;
     if (!measures || !measures.length) {
-        el.hidden = true;
-        el.innerHTML = '';
+        el.innerHTML = '<div class="tier-empty">No measures to summarise yet.</div>';
         return;
     }
 
     const cards = measures.map(m => {
-        const g = m.group;
         const dp = m.decimals;
         const diffLabel = m.diff_label || '165 Hz − 60 Hz';
-        if (!g || g.n === 0) {
+        const ap = m.apriori || {};
+        // Primary = incongruent a-priori stats; fall back to the pooled headline
+        // group only if the a-priori block is somehow absent.
+        const prim = ap.incongruent || m.group;
+        const comb = ap.combined;
+
+        if (!prim || prim.n === 0) {
             return `
-            <div class="ro-card ro-empty">
-                <div class="ro-measure">${escapeHtml(m.label)}</div>
-                <div class="ro-nodata">No participant has both conditions yet.</div>
+            <div class="t1-card t1-empty">
+                <div class="t1-measure">${escapeHtml(m.label)}</div>
+                <div class="t1-nodata">No participant passes the a-priori inclusion
+                    rule for the primary (incongruent) contrast yet.</div>
             </div>`;
         }
-        const d = g.mean_diff;
-        const dir = d > 0 ? 'ro-up' : (d < 0 ? 'ro-down' : 'ro-flat');
+        const d = prim.mean_diff;
+        const dir = d > 0 ? 't1-up' : (d < 0 ? 't1-down' : 't1-flat');
         const arrow = d > 0 ? '▲' : (d < 0 ? '▼' : '■');
-        const ci = (g.ci95_lo == null)
+        const ci = (prim.ci95_lo == null)
             ? '—'
-            : `${fmtNum(g.ci95_lo, dp)} … ${fmtNum(g.ci95_hi, dp)}`;
+            : `${fmtNum(prim.ci95_lo, dp)} … ${fmtNum(prim.ci95_hi, dp)}`;
+        const ttxt = (prim.t_stat == null)
+            ? 't —'
+            : `t(${prim.df}) = ${fmtNum(prim.t_stat, 2)}`;
+        const combLine = (comb && comb.n)
+            ? `<div class="t1-secondary">Combined (pooled con+inc): mean Δ
+                ${fmtNum(comb.mean_diff, dp)}, N=${comb.n}
+                ${comb.p_value != null ? '· ' + fmtP(comb.p_value) : ''}</div>`
+            : '';
+        const chExcl = (ap.channel_scoped && ap.n_channel_excluded)
+            ? `<div class="t1-chexcl">${ap.n_channel_excluded} participant(s)
+                channel-excluded (both contrasts failed the rule)</div>`
+            : '';
         return `
-        <div class="ro-card">
-            <div class="ro-measure">${escapeHtml(m.label)}</div>
-            <div class="ro-sub">${escapeHtml(m.unit)}</div>
-            <div class="ro-mean ${dir}"><span class="ro-arrow">${arrow}</span>${d > 0 ? '+' : ''}${fmtNum(d, dp)}</div>
-            <div class="ro-mean-lab">mean Δ (${escapeHtml(diffLabel)})</div>
-            <div class="ro-meta">
-                <span title="Median of the per-participant differences">median Δ ${fmtNum(g.median_diff, dp)}</span>
+        <div class="t1-card">
+            <div class="t1-measure">${escapeHtml(m.label)}</div>
+            <div class="t1-sub">${escapeHtml(m.channel)}${m.band ? ' · ' + escapeHtml(m.band) : ''} · ${escapeHtml(m.unit)}</div>
+            <div class="t1-mean ${dir}"><span class="t1-arrow">${arrow}</span>${d > 0 ? '+' : ''}${fmtNum(d, dp)}</div>
+            <div class="t1-mean-lab">mean Δ (${escapeHtml(diffLabel)}) · <em>incongruent, primary</em></div>
+            <div class="t1-test">
+                <span title="Paired-samples t-test of the per-participant differences">${ttxt}</span>
+                <span>${fmtP(prim.p_value)}</span>
+                ${sigLabel(prim.p_value)}
+            </div>
+            <div class="t1-meta">
                 <span title="95% confidence interval of the mean difference">95% CI ${ci}</span>
-                <span>N=${g.n}</span>
+                <span title="Median of the per-participant differences">median Δ ${fmtNum(prim.median_diff, dp)}</span>
+                <span title="Effective N after the a-priori inclusion rule">N = ${prim.n}</span>
+            </div>
+            ${combLine}
+            ${chExcl}
+        </div>`;
+    }).join('');
+
+    el.innerHTML = `<div class="t1-grid">${cards}</div>`;
+}
+
+// ── Tier 3 — Gaming-group split (H2/H4) ──
+// The per-participant 60-vs-165 differences split by gaming-exposure group
+// (HIGH / LOW), with EXCLUDED shown as its own labelled category — never merged
+// into LOW or silently dropped. Thresholds come from the payload's gaming_config
+// (no inline literals). One paired plot per measure, coloured by group.
+function renderTier3Gaming(data) {
+    const el = document.getElementById('tier3-gaming');
+    const noteEl = document.getElementById('tier3-note');
+    if (!el) return;
+    const counts = data.gaming_counts || {};
+    const cfg = data.gaming_config || {};
+    if (noteEl) {
+        const hoursHigh = cfg.hours_high, hoursLow = cfg.hours_low;
+        const types = (cfg.type_high_prefixes || []).join(' / ');
+        noteEl.innerHTML = `The same per-participant differences, split by an
+            <strong>a-priori</strong> gaming-exposure rule (derived from the
+            questionnaire, not a roster). <strong>HIGH</strong> = avg ≥ ${hoursHigh}
+            <em>and</em> past-week ≥ ${hoursHigh} hours <em>and</em> game type in
+            {${escapeHtml(types)}}; <strong>LOW</strong> = avg ≤ ${hoursLow}
+            <em>and</em> past-week ≤ ${hoursLow} hours (type ignored);
+            <strong>EXCLUDED</strong> = everyone else (shown, never merged).
+            Census: ${counts.high || 0} high / ${counts.low || 0} low /
+            ${counts.excluded || 0} excluded${counts.unknown ? ' / ' + counts.unknown + ' unknown' : ''}.
+            H2/H4 compare HIGH vs LOW.`;
+    }
+
+    const measures = data.measures || [];
+    if (!measures.length) {
+        el.innerHTML = '<div class="tier-empty">No measures to split yet.</div>';
+        return;
+    }
+
+    el.innerHTML = measures.map(m => `
+        <div class="t3-measure">
+            <h4 class="t3-title">${escapeHtml(m.label)} <span class="t3-unit">${escapeHtml(m.unit)}</span></h4>
+            <div class="t3-chart" id="t3-chart-${m.key}"></div>
+            <div class="t3-stats" id="t3-stats-${m.key}"></div>
+        </div>`).join('');
+
+    measures.forEach(m => drawGamingSplit(m));
+}
+
+// Paired plot for one measure, one line per participant, coloured by gaming
+// group; EXCLUDED lines drawn faintly and dashed so they are visible but clearly
+// set apart. Also prints the HIGH / LOW group mean Δ underneath.
+function drawGamingSplit(m) {
+    const chartEl = document.getElementById(`t3-chart-${m.key}`);
+    const statsEl = document.getElementById(`t3-stats-${m.key}`);
+    if (!chartEl) return;
+    const complete = m.participants.filter(p => p.has_both);
+    if (!complete.length) {
+        chartEl.innerHTML = '<div class="refresh-chart-empty">No participant has both conditions yet.</div>';
+        if (statsEl) statsEl.innerHTML = '';
+        return;
+    }
+    const a = (refreshAgg === 'mean') ? 'mean' : 'median';
+    const xLabels = [m.rate_low, m.rate_high];
+    const seen = new Set();
+    const traces = complete.map(p => {
+        const cat = p.gaming || 'unknown';
+        const colour = GAMING_COLORS[cat] || GAMING_COLORS.unknown;
+        const showLegend = !seen.has(cat);
+        if (showLegend) seen.add(cat);
+        return {
+            type: 'scatter', mode: 'lines+markers',
+            name: GAMING_LABELS[cat] || 'Unknown',
+            legendgroup: cat, showlegend: showLegend,
+            x: xLabels,
+            y: [p.conditions[m.rate_low][a], p.conditions[m.rate_high][a]],
+            line: { color: colour, width: 1.6, dash: cat === 'excluded' ? 'dot' : 'solid' },
+            marker: { color: colour, size: 6 },
+            opacity: cat === 'excluded' ? 0.4 : 0.85,
+            hovertemplate: `${escapeHtml(p.filename)} (${GAMING_LABELS[cat] || 'Unknown'})<br>%{x} (${a}): %{y}<extra></extra>`,
+        };
+    });
+    const layout = {
+        ...plotlyLayout, height: 280, margin: { t: 10, r: 15, b: 45, l: 55 },
+        showlegend: true,
+        xaxis: { ...plotlyLayout.xaxis, type: 'category', tickfont: { size: 10 }, range: [-0.35, 1.35] },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: m.unit, font: { size: 10 } } },
+    };
+    Plotly.newPlot(chartEl.id, traces, layout, plotlyConfig);
+
+    if (statsEl) {
+        const dp = m.decimals;
+        const groupMean = (cat) => {
+            const diffs = complete
+                .filter(p => (p.gaming || 'unknown') === cat)
+                .map(p => a === 'mean' ? p.diff_mean : p.diff_median)
+                .filter(v => v != null);
+            if (!diffs.length) return null;
+            return diffs.reduce((s, v) => s + v, 0) / diffs.length;
+        };
+        const mk = (cat) => {
+            const v = groupMean(cat);
+            const n = complete.filter(p => (p.gaming || 'unknown') === cat).length;
+            return `<span class="t3-stat t3-${cat}">
+                <span class="t3-dot" style="background:${GAMING_COLORS[cat]}"></span>
+                ${GAMING_LABELS[cat]}: ${v == null ? '—' : (v > 0 ? '+' : '') + fmtNum(v, dp)}
+                <span class="rr-n">mean Δ, n=${n}</span></span>`;
+        };
+        statsEl.innerHTML = mk('high') + mk('low') + mk('excluded');
+    }
+}
+
+// ── Tier 4 — Validity check (congruency effect) ──
+// The incongruent − congruent contrast per participant, per measure — the
+// Flanker manipulation check. A positive effect (e.g. higher incongruent theta,
+// slower incongruent RT) confirms the task engaged conflict processing. Bars
+// only; explicitly not a headline, never withheld.
+function renderTier4Validity(measures) {
+    const el = document.getElementById('tier4-validity');
+    if (!el) return;
+    if (!measures || !measures.length) {
+        el.innerHTML = '<div class="tier-empty">No measures yet.</div>';
+        return;
+    }
+    el.innerHTML = measures.map(m => `
+        <div class="t4-measure">
+            <h4 class="t4-title">${escapeHtml(m.label)} <span class="t4-unit">incongruent − congruent, ${escapeHtml(m.unit)}</span></h4>
+            <div class="t4-chart" id="t4-chart-${m.key}"></div>
+        </div>`).join('');
+    measures.forEach(m => drawCongruencyEffect(m));
+}
+
+function drawCongruencyEffect(m) {
+    const chartEl = document.getElementById(`t4-chart-${m.key}`);
+    if (!chartEl) return;
+    const rows = m.participants
+        .filter(p => p.congruency_effect != null)
+        .map(p => ({ name: p.filename, eff: p.congruency_effect }));
+    if (!rows.length) {
+        chartEl.innerHTML = '<div class="refresh-chart-empty">No participant has both congruency conditions yet.</div>';
+        return;
+    }
+    const names = rows.map(r => r.name);
+    const effs = rows.map(r => r.eff);
+    const colours = effs.map(e => e >= 0 ? INC_COLOR : DIM_COLOR);
+    const traces = [{
+        x: names, y: effs, type: 'bar',
+        marker: { color: colours, opacity: 0.85 },
+        hovertemplate: `%{x}<br>inc − con: %{y}<extra></extra>`,
+    }];
+    const layout = {
+        ...plotlyLayout, height: 260, margin: { t: 10, r: 15, b: 60, l: 55 },
+        showlegend: false,
+        xaxis: { ...plotlyLayout.xaxis, tickfont: { size: 9 } },
+        yaxis: {
+            ...plotlyLayout.yaxis, title: { text: m.unit, font: { size: 10 } },
+            zeroline: true, zerolinecolor: 'rgba(255,255,255,0.15)', zerolinewidth: 1,
+        },
+    };
+    Plotly.newPlot(chartEl.id, traces, layout, plotlyConfig);
+}
+
+// ── Tier 5 — Sample & quality ──
+// Demographic table (age, sex, handedness, block order) for sample description,
+// plus the per-measure effective N & exclusion picture after the a-priori rule.
+// This replaces the retired "exclusion rate by subject".
+function renderTier5Sample(data) {
+    const el = document.getElementById('tier5-sample');
+    if (!el) return;
+    const measures = data.measures || [];
+
+    // Per-measure effective N + exclusion breakdown from the a-priori block.
+    const apCfg = data.apriori_config || {};
+    const measureCards = measures.map(m => {
+        const ap = m.apriori || {};
+        const prim = ap.incongruent || {};
+        const con = ap.congruent || {};
+        const comb = ap.combined || {};
+        return `
+        <div class="t5-mcard">
+            <div class="t5-mlabel">${escapeHtml(m.label)}</div>
+            <div class="t5-mn">Effective N — primary (incongruent): <strong>${prim.n || 0}</strong></div>
+            <div class="t5-mn-sub">
+                congruent N ${con.n || 0} · combined N ${comb.n || 0}
+                ${ap.channel_scoped ? `· channel-excluded ${ap.n_channel_excluded || 0}` : '· RT (never channel-excluded)'}
             </div>
         </div>`;
     }).join('');
 
-    el.hidden = false;
+    // Demographic table — one row per loaded participant (from the measures'
+    // participant list; identical across measures, so use the first).
+    const seen = new Map();
+    for (const m of measures) {
+        for (const p of m.participants) {
+            if (!seen.has(p.result_id)) seen.set(p.result_id, p);
+        }
+    }
+    const parts = [...seen.values()];
+    const demoRows = parts.map(p => {
+        const d = p.demographics || {};
+        const bo = d.block_order || {};
+        const blockOrder = (bo['1'] || bo['2'])
+            ? `${bo['1'] || '?'} / ${bo['2'] || '?'}` : '—';
+        return `<tr>
+            <td>${escapeHtml(p.filename)}</td>
+            <td>${escapeHtml(d.age || '—')}</td>
+            <td>${escapeHtml(d.sex || '—')}</td>
+            <td>${escapeHtml(HANDEDNESS_LABELS[p.handedness] || '—')}</td>
+            <td>${escapeHtml(GAMING_LABELS[p.gaming] || '—')}</td>
+            <td>${escapeHtml(blockOrder)}</td>
+        </tr>`;
+    }).join('');
+
     el.innerHTML = `
-        <div class="ro-title">Sample averages · trend across all participants</div>
-        <div class="ro-grid">${cards}</div>`;
+        <div class="t5-effn">
+            <div class="t5-effn-title">Per-measure effective N (after the a-priori rule:
+                floor ≥ ${apCfg.floor_min_trials} clean trials/cell, balance no worse
+                than ${escapeHtml(apCfg.balance_max_imbalance || '2:1')})</div>
+            <div class="t5-mcards">${measureCards}</div>
+        </div>
+        <div class="t5-demo">
+            <div class="t5-demo-title">Sample description (N=${parts.length} loaded)</div>
+            <div class="compare-table-wrap">
+                <table class="compare-table">
+                    <thead><tr>
+                        <th>Participant</th><th>Age</th><th>Sex</th>
+                        <th>Handedness</th><th>Gaming</th><th>Block order</th>
+                    </tr></thead>
+                    <tbody>${demoRows || '<tr><td colspan="6">No participants loaded.</td></tr>'}</tbody>
+                </table>
+            </div>
+        </div>`;
+}
+
+// ── Tier 6 — Exploratory ──
+// Correlations of the per-participant refresh effect (165 − 60 difference score)
+// against age and against baseline RT (the participant's 60 Hz RT median), plus
+// a sortable per-participant table. Clearly exploratory — not a planned analysis.
+function renderTier6Exploratory(measures) {
+    const el = document.getElementById('tier6-exploratory');
+    if (!el) return;
+    if (!measures || !measures.length) {
+        el.innerHTML = '<div class="tier-empty">No measures yet.</div>';
+        return;
+    }
+
+    // Baseline RT per participant = their 60 Hz (lower-rate) RT median, taken
+    // from the rt_ms measure's conditions. Keyed by result_id.
+    const rtMeasure = measures.find(m => m.key === 'rt_ms');
+    const baselineRT = new Map();
+    if (rtMeasure) {
+        for (const p of rtMeasure.participants) {
+            const lo = p.conditions[rtMeasure.rate_low];
+            if (lo) baselineRT.set(p.result_id, lo.median);
+        }
+    }
+
+    const scatterCards = measures.map(m => `
+        <div class="t6-corr">
+            <h4 class="t6-title">${escapeHtml(m.label)} Δ vs age</h4>
+            <div class="t6-chart" id="t6-age-${m.key}"></div>
+        </div>
+        <div class="t6-corr">
+            <h4 class="t6-title">${escapeHtml(m.label)} Δ vs baseline RT (60 Hz)</h4>
+            <div class="t6-chart" id="t6-rt-${m.key}"></div>
+        </div>`).join('');
+
+    el.innerHTML = `
+        <div class="t6-scatter-grid">${scatterCards}</div>
+        <div class="t6-table-wrap" id="t6-table"></div>`;
+
+    measures.forEach(m => {
+        drawCorrelation(`t6-age-${m.key}`, m, p => {
+            const age = p.demographics && p.demographics.age_num;
+            return age != null ? age : null;
+        }, 'Age (years)');
+        drawCorrelation(`t6-rt-${m.key}`, m, p => {
+            const b = baselineRT.get(p.result_id);
+            return b != null ? b : null;
+        }, 'Baseline RT (ms, 60 Hz)');
+    });
+
+    renderTier6Table(measures, baselineRT);
+}
+
+// Scatter of per-participant refresh Δ (y) vs an x-variable, with Pearson r.
+function drawCorrelation(containerId, m, xFn, xLabel) {
+    const chartEl = document.getElementById(containerId);
+    if (!chartEl) return;
+    const pts = m.participants
+        .filter(p => p.has_both)
+        .map(p => ({ x: xFn(p), y: p.diff_median, name: p.filename }))
+        .filter(pt => pt.x != null && pt.y != null);
+    if (pts.length < 2) {
+        chartEl.innerHTML = '<div class="refresh-chart-empty">Need ≥ 2 participants with this variable to correlate.</div>';
+        return;
+    }
+    const r = pearson(pts.map(p => p.x), pts.map(p => p.y));
+    const trace = {
+        type: 'scatter', mode: 'markers',
+        x: pts.map(p => p.x), y: pts.map(p => p.y),
+        text: pts.map(p => p.name),
+        marker: { color: '#5eead4', size: 8, opacity: 0.8 },
+        hovertemplate: `%{text}<br>${escapeHtml(xLabel)}: %{x}<br>Δ: %{y}<extra></extra>`,
+    };
+    const layout = {
+        ...plotlyLayout, height: 240, margin: { t: 24, r: 15, b: 45, l: 55 },
+        showlegend: false,
+        title: { text: r == null ? '' : `r = ${fmtNum(r, 2)} (n=${pts.length})`, font: { size: 11 }, x: 0, xanchor: 'left' },
+        xaxis: { ...plotlyLayout.xaxis, title: { text: xLabel, font: { size: 10 } } },
+        yaxis: { ...plotlyLayout.yaxis, title: { text: `Δ ${m.unit}`, font: { size: 10 } },
+            zeroline: true, zerolinecolor: 'rgba(255,255,255,0.15)' },
+    };
+    Plotly.newPlot(containerId, [trace], layout, plotlyConfig);
+}
+
+// Pearson correlation coefficient; null when undefined (n<2 or zero variance).
+function pearson(xs, ys) {
+    const n = xs.length;
+    if (n < 2) return null;
+    const mx = xs.reduce((s, v) => s + v, 0) / n;
+    const my = ys.reduce((s, v) => s + v, 0) / n;
+    let sxy = 0, sxx = 0, syy = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = xs[i] - mx, dy = ys[i] - my;
+        sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+    }
+    if (sxx === 0 || syy === 0) return null;
+    return sxy / Math.sqrt(sxx * syy);
+}
+
+// Sortable per-participant table: refresh Δ for each measure + age + baseline RT.
+function renderTier6Table(measures, baselineRT) {
+    const wrap = document.getElementById('t6-table');
+    if (!wrap) return;
+    // Assemble one row per participant that has both conditions in any measure.
+    const byId = new Map();
+    for (const m of measures) {
+        for (const p of m.participants) {
+            if (!byId.has(p.result_id)) {
+                byId.set(p.result_id, {
+                    filename: p.filename,
+                    age: (p.demographics && p.demographics.age_num) ?? null,
+                    baselineRT: baselineRT.get(p.result_id) ?? null,
+                    diffs: {},
+                });
+            }
+            byId.get(p.result_id).diffs[m.key] = p.has_both ? p.diff_median : null;
+        }
+    }
+    const rows = [...byId.values()];
+    const cols = [
+        { key: 'filename', label: 'Participant', num: false },
+        ...measures.map(m => ({ key: 'diff:' + m.key, label: `${m.label} Δ`, num: true, mkey: m.key, dp: m.decimals })),
+        { key: 'age', label: 'Age', num: true },
+        { key: 'baselineRT', label: 'Baseline RT', num: true },
+    ];
+    const cellVal = (row, c) => {
+        if (c.key === 'filename') return row.filename;
+        if (c.key === 'age') return row.age;
+        if (c.key === 'baselineRT') return row.baselineRT;
+        return row.diffs[c.mkey];
+    };
+    let sortKey = 'filename', sortDir = 1;
+    function render() {
+        const sorted = [...rows].sort((a, b) => {
+            const c = cols.find(x => x.key === sortKey);
+            let va = cellVal(a, c), vb = cellVal(b, c);
+            if (va == null) return 1;
+            if (vb == null) return -1;
+            if (typeof va === 'string') return sortDir * va.localeCompare(vb);
+            return sortDir * (va - vb);
+        });
+        const head = cols.map(c =>
+            `<th class="t6-th ${c.key === sortKey ? 't6-sorted' : ''}" data-key="${escapeHtml(c.key)}" role="button" tabindex="0">
+                ${escapeHtml(c.label)}${c.key === sortKey ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('');
+        const body = sorted.map(row => {
+            const tds = cols.map(c => {
+                const v = cellVal(row, c);
+                if (c.key === 'filename') return `<td>${escapeHtml(v)}</td>`;
+                if (v == null) return '<td>—</td>';
+                if (c.mkey) {
+                    const cls = v > 0 ? 'rr-up' : (v < 0 ? 'rr-down' : '');
+                    return `<td class="${cls}">${v > 0 ? '+' : ''}${fmtNum(v, c.dp)}</td>`;
+                }
+                return `<td>${fmtNum(v, c.key === 'baselineRT' ? 0 : 0)}</td>`;
+            }).join('');
+            return `<tr>${tds}</tr>`;
+        }).join('');
+        wrap.innerHTML = `
+            <div class="t6-table-title">Sortable per-participant table (click a header)</div>
+            <div class="compare-table-wrap">
+                <table class="compare-table t6-sortable">
+                    <thead><tr>${head}</tr></thead>
+                    <tbody>${body}</tbody>
+                </table>
+            </div>`;
+        wrap.querySelectorAll('.t6-th').forEach(th => {
+            const go = () => {
+                const k = th.dataset.key;
+                if (sortKey === k) sortDir = -sortDir;
+                else { sortKey = k; sortDir = 1; }
+                render();
+            };
+            th.addEventListener('click', go);
+            th.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+            });
+        });
+    }
+    render();
 }
 
 // Collect the excluded subjects across measures and explain each. A subject can
@@ -2884,12 +3213,8 @@ async function restoreSession() {
     const sess = readSession();
     const stillHere = id => uploadedSubjects.some(s => s.result_id === id);
 
-    if (sess.view === 'compare' && uploadedSubjects.length >= 2) {
-        updateCompareButton();
-        showComparison();
-        return;
-    }
-    if (sess.view === 'refresh') {
+    if ((sess.view === 'compare' || sess.view === 'refresh')
+            && uploadedSubjects.length >= 2) {
         updateCompareButton();
         showRefreshComparison();
         return;
@@ -2914,9 +3239,7 @@ function initActions() {
         if (currentResultId) window.location.href = `${API}/api/download-csv-exclusions/${currentResultId}`;
     });
     document.getElementById('btn-add-subject').addEventListener('click', () => goToUpload());
-    document.getElementById('btn-compare').addEventListener('click', () => showComparison());
-    document.getElementById('btn-refresh-view').addEventListener('click', () => showRefreshComparison());
-    document.getElementById('btn-refresh-from-compare').addEventListener('click', () => showRefreshComparison());
+    document.getElementById('btn-compare').addEventListener('click', () => showRefreshComparison());
 
     document.getElementById('btn-new').addEventListener('click', async () => {
         for (const s of uploadedSubjects) {
@@ -2930,19 +3253,10 @@ function initActions() {
         goToUpload();
     });
 
-    document.getElementById('btn-back-individual').addEventListener('click', () => {
-        document.getElementById('compare-section').hidden = true;
-        document.getElementById('results-section').hidden = false;
-    });
-
     // Refresh-rate view navigation
     document.getElementById('btn-refresh-back').addEventListener('click', () => {
         document.getElementById('refresh-section').hidden = true;
-        if (uploadedSubjects.length >= 2) {
-            showComparison();
-        } else {
-            document.getElementById('results-section').hidden = false;
-        }
+        document.getElementById('results-section').hidden = false;
     });
     document.getElementById('btn-refresh-add-more').addEventListener('click', () => {
         document.getElementById('refresh-section').hidden = true;
@@ -3030,14 +3344,9 @@ function initActions() {
     document.getElementById('btn-download-trials-all').addEventListener('click', () => {
         window.location.href = `${API}/api/download-csv-trials-all`;
     });
-    document.getElementById('btn-add-more').addEventListener('click', () => {
-        document.getElementById('compare-section').hidden = true;
-        goToUpload();
-    });
 
     document.getElementById('header-home-link').addEventListener('click', (e) => {
         e.preventDefault();
-        document.getElementById('compare-section').hidden = true;
         document.getElementById('results-section').hidden = true;
         document.getElementById('refresh-section').hidden = true;
         goToUpload();

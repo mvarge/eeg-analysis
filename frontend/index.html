@@ -388,8 +388,7 @@
                     </svg>
                     Add Another Participant
                 </button>
-                <button id="btn-compare" class="btn-secondary" disabled>Compare Participants</button>
-                <button id="btn-refresh-view" class="btn-secondary">60 vs 165 Hz</button>
+                <button id="btn-compare" class="btn-secondary" disabled>Group View</button>
                 <button id="btn-new" class="btn-secondary">Start Over</button>
             </div>
 
@@ -399,79 +398,23 @@
             </div>
         </section>
 
-        <!-- Comparison Section -->
-        <section id="compare-section" class="section" hidden>
-            <div class="section-header">
-                <h2>Group Comparison</h2>
-                <div class="section-header-actions">
-                    <button id="btn-refresh-from-compare" class="btn-secondary btn-sm">60 vs 165 Hz →</button>
-                    <button id="btn-back-individual" class="btn-secondary btn-sm">← Back to Individual</button>
-                </div>
-            </div>
-
-            <div class="compare-table-wrap">
-                <table id="compare-table" class="compare-table">
-                    <thead></thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-
-            <div class="charts-grid">
-                <div class="chart-panel">
-                    <h3>θ Relative Power by Participant (Fz-Pz)</h3>
-                    <div id="chart-compare-theta" class="chart-container"></div>
-                </div>
-                <div class="chart-panel">
-                    <h3>β Relative Power by Participant (C3-C4)</h3>
-                    <div id="chart-compare-beta" class="chart-container"></div>
-                </div>
-                <div class="chart-panel">
-                    <h3>Exclusion Rate by Participant</h3>
-                    <div id="chart-compare-exclusion" class="chart-container"></div>
-                </div>
-                <div class="chart-panel">
-                    <h3>Congruency Effect — Theta (Incongruent − Congruent)</h3>
-                    <div id="chart-compare-effect" class="chart-container"></div>
-                </div>
-            </div>
-
-            <div class="actions-bar">
-                <button id="btn-download-all" class="btn-primary">
-                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                        <path d="M9 3v9M9 12L5 8M9 12l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                        <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                    </svg>
-                    Group Summary CSV
-                </button>
-                <button id="btn-download-trials-all" class="btn-primary">
-                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                        <path d="M9 3v9M9 12L5 8M9 12l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                        <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                    </svg>
-                    Group Trial-Level CSV
-                </button>
-                <button id="btn-add-more" class="btn-secondary">Add More Participants</button>
-            </div>
-        </section>
-
-        <!-- Refresh-Rate Comparison Section (60 Hz vs 165 Hz) -->
+        <!-- Group View — tiered 60 Hz vs 165 Hz (headline → exploratory) -->
         <section id="refresh-section" class="section" hidden>
             <div class="section-header">
-                <h2>Refresh Rate — 60 Hz vs 165 Hz</h2>
+                <h2>Group View — 60 Hz vs 165 Hz</h2>
                 <div class="section-header-actions">
                     <button id="btn-refresh-back" class="btn-secondary btn-sm">← Back</button>
                 </div>
             </div>
             <p class="refresh-intro">
-                For each measure: every participant's value in the 60 Hz and 165 Hz
-                conditions, and the difference (<strong>165 Hz − 60 Hz</strong>).
-                Per-participant values are the <strong>median</strong> of that
-                condition's included trials (robust to skew/artifact); the group
-                headline is the <strong>mean Δ</strong> of those per-participant
-                differences (matching the paired t-test), with median Δ / SD / 95%
-                CI alongside. Conditions are assigned from each participant's
-                refresh-rate ordering, not block number. Click any chart to see how
-                a number was computed.
+                Ordered top-down: the <strong>headline result</strong> first, then
+                the effect per participant, planned subgroup and validity checks,
+                and finally sample description and exploratory analyses. For each
+                measure a participant's condition value is the <strong>median</strong>
+                of that condition's included trials; the headline is the
+                <strong>mean Δ</strong> (165 − 60) of the per-participant differences
+                with its paired-test result, 95% CI and per-measure N. Conditions
+                come from each participant's refresh-rate ordering, not block number.
             </p>
             <div class="refresh-toolbar">
                 <span class="refresh-toolbar-label">Per-participant values (inspection only):</span>
@@ -494,9 +437,80 @@
                 </label>
                 <span class="refresh-toolbar-note" id="handedness-subset-note"></span>
             </div>
-            <div id="refresh-overview" class="refresh-overview" hidden></div>
-            <div id="refresh-warning" class="refresh-warning" hidden></div>
-            <div id="refresh-measures" class="refresh-measures"></div>
+
+            <!-- Tier 1 — Headline -->
+            <div class="tier" id="tier-1">
+                <div class="tier-head">
+                    <span class="tier-badge tier-badge-1">Tier 1</span>
+                    <h3 class="tier-title">Headline — the 60-vs-165 result</h3>
+                </div>
+                <p class="tier-note">Primary hypothesis: the <strong>incongruent</strong>
+                    60-vs-165 contrast, with per-measure N after the a-priori inclusion
+                    rule. Mean Δ is 165 − 60.</p>
+                <div id="tier1-headline" class="tier1-headline"></div>
+            </div>
+
+            <!-- Tier 2 — The effect, per participant -->
+            <div class="tier" id="tier-2">
+                <div class="tier-head">
+                    <span class="tier-badge tier-badge-2">Tier 2</span>
+                    <h3 class="tier-title">The effect, per participant</h3>
+                </div>
+                <p class="tier-note">Paired ("spaghetti") plot — each participant's two
+                    condition values joined — and the distribution of the
+                    per-participant differences (165 − 60). Shows whether the group
+                    effect is consistent or driven by a few participants. Click any
+                    chart for its computation trace.</p>
+                <div id="refresh-measures" class="refresh-measures"></div>
+            </div>
+
+            <!-- Tier 3 — Gaming-group split (H2/H4) -->
+            <div class="tier" id="tier-3">
+                <div class="tier-head">
+                    <span class="tier-badge tier-badge-3">Tier 3</span>
+                    <h3 class="tier-title">Gaming-group split (H2 / H4)</h3>
+                </div>
+                <p class="tier-note" id="tier3-note"></p>
+                <div id="tier3-gaming" class="tier3-gaming"></div>
+            </div>
+
+            <!-- Tier 4 — Validity check -->
+            <div class="tier" id="tier-4">
+                <div class="tier-head">
+                    <span class="tier-badge tier-badge-4">Tier 4</span>
+                    <h3 class="tier-title">Validity check — congruency effect</h3>
+                </div>
+                <p class="tier-note">Congruency effect (incongruent − congruent) per
+                    participant. This is a <strong>manipulation check</strong>, not a
+                    headline: a positive effect confirms the Flanker task worked as
+                    intended. Never withheld and never excludes anyone.</p>
+                <div id="tier4-validity" class="tier4-validity"></div>
+            </div>
+
+            <!-- Tier 5 — Sample & quality -->
+            <div class="tier" id="tier-5">
+                <div class="tier-head">
+                    <span class="tier-badge tier-badge-5">Tier 5</span>
+                    <h3 class="tier-title">Sample &amp; quality</h3>
+                </div>
+                <p class="tier-note">Sample description and the per-measure effective N
+                    &amp; exclusion picture — who is included in theta vs beta vs RT
+                    after the a-priori inclusion rule, and why anyone is excluded.</p>
+                <div id="tier5-sample" class="tier5-sample"></div>
+                <div id="refresh-warning" class="refresh-warning" hidden></div>
+            </div>
+
+            <!-- Tier 6 — Exploratory -->
+            <div class="tier" id="tier-6">
+                <div class="tier-head">
+                    <span class="tier-badge tier-badge-6">Tier 6</span>
+                    <h3 class="tier-title">Exploratory</h3>
+                </div>
+                <p class="tier-note"><strong>Exploratory, not a planned analysis.</strong>
+                    Correlations (refresh effect vs age, vs baseline RT) and a sortable
+                    per-participant table. Treat as hypothesis-generating only.</p>
+                <div id="tier6-exploratory" class="tier6-exploratory"></div>
+            </div>
 
             <div class="actions-bar">
                 <button id="btn-refresh-download" class="btn-primary">
@@ -505,6 +519,20 @@
                         <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                     </svg>
                     Download 60-vs-165 CSV
+                </button>
+                <button id="btn-download-all" class="btn-primary">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <path d="M9 3v9M9 12L5 8M9 12l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    Group Summary CSV
+                </button>
+                <button id="btn-download-trials-all" class="btn-primary">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                        <path d="M9 3v9M9 12L5 8M9 12l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        <path d="M3 15h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    Group Trial-Level CSV
                 </button>
                 <button id="btn-refresh-add-more" class="btn-secondary">Add More Participants</button>
             </div>
