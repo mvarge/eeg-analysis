@@ -45,7 +45,8 @@ from pipeline import (
 from demographics import (
     Demographic, DISPLAY_FIELDS,
     parse_demographics, match_demographics, parse_filename_ids,
-    handedness_category,
+    handedness_category, gaming_category,
+    GAMING_HOURS_HIGH, GAMING_HOURS_LOW, GAMING_TYPE_HIGH_PREFIXES,
 )
 from behavioural import (
     BehaviouralSession, AlignmentResult,
@@ -54,6 +55,7 @@ from behavioural import (
 from merge import select_blocks
 from checks import run_subject_checks, checks_to_payload, check_cohort_amplitude
 from logging_setup import get_logger, configure_logging
+import apriori
 
 configure_logging()
 logger = get_logger(__name__)
@@ -499,6 +501,27 @@ def _handedness_of(filename: str) -> str:
     return handedness_category(demo.display.get("handedness"))
 
 
+def _gaming_of(filename: str) -> str:
+    """Gaming-exposure category for a recording's participant (Tier 3 / H2 & H4).
+
+    Resolves the participant's demographics row and applies the a-priori gaming
+    classification rule to the three questionnaire fields (avg hours, past-week
+    hours, game type). Returns 'high' / 'low' / 'excluded'; 'unknown' when
+    demographics are absent or unmatched. Derived from the data every call —
+    never a stored roster.
+    """
+    if not _demographics:
+        return "unknown"
+    demo = match_demographics(filename, _demographics)
+    if demo is None:
+        return "unknown"
+    return gaming_category(
+        demo.display.get("games_hours_week"),
+        demo.display.get("games_last_week"),
+        demo.display.get("game_type"),
+    )
+
+
 # The handedness subsets the group view can restrict to. Each maps to the set of
 # categories that are KEPT. 'all' keeps everyone (including unknown); the split
 # is reveal-only — it recomputes group stats over the subset, never adjusts data.
@@ -534,6 +557,7 @@ def _group_stats(diffs: List[float]) -> dict:
         "mean_diff": None, "median_diff": None,
         "sd_diff": None, "sem_diff": None,
         "ci95_lo": None, "ci95_hi": None,
+        "t_stat": None, "p_value": None, "df": None,
     }
     if n == 0:
         return out
@@ -552,6 +576,20 @@ def _group_stats(diffs: List[float]) -> dict:
             tcrit = 1.96
         out["ci95_lo"] = mean - tcrit * sem
         out["ci95_hi"] = mean + tcrit * sem
+        # Paired-samples t-test on the difference scores. A one-sample t of the
+        # per-participant (high − low) differences against 0 is exactly the
+        # paired t-test of high vs low, so we report its statistic + two-sided
+        # p-value for the Tier-1 headline. df = n − 1. Guarded: a zero-variance
+        # set (all diffs identical) has no defined t, and scipy may be absent.
+        out["df"] = n - 1
+        if sd > 0:
+            t_stat = mean / sem
+            out["t_stat"] = float(t_stat)
+            try:
+                from scipy import stats as _stats
+                out["p_value"] = float(2.0 * _stats.t.sf(abs(t_stat), n - 1))
+            except Exception:
+                out["p_value"] = None
     return out
 
 
@@ -638,6 +676,7 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
             "result_id": rid,
             "filename": r.filename,
             "handedness": _handedness_of(r.filename),
+            "gaming": _gaming_of(r.filename),
             "has_both": False,
             "conditions": {},     # hz_label -> {median, mean, n, trials:[...]}
             "diff": None,         # primary (median-based) high−low
@@ -671,6 +710,10 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
 
         # Group included trials by refresh-rate label.
         by_rate: Dict[str, list] = {}
+        # Per-cell (refresh × congruency) surviving trial values, for the
+        # a-priori inclusion rule (apriori.py). 'con' = congruent, 'first' =
+        # incongruent. RT has no channel exclusion but the same cells apply.
+        by_cell: Dict[tuple, list] = {}
         for t in r.trials:
             label = hz_map.get(t.block)
             if not label:
@@ -679,6 +722,7 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
                 continue
             val = getattr(t, spec["value_attr"])
             by_rate.setdefault(label, []).append((t.trial, t.block, float(val)))
+            by_cell.setdefault((label, t.cond), []).append(float(val))
 
         for label, rows in by_rate.items():
             rate_labels.add(label)
@@ -697,6 +741,10 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
             entry["has_both"] = True
         else:
             _classify_incomplete(entry, r, hz_map, measure_key)
+        # Attach per-cell (refresh × congruency) surviving values so the
+        # per-participant a-priori evaluation and the condition-split (Tier 4 /
+        # gaming Tier 3) can be computed below without re-walking trials.
+        entry["_by_cell"] = by_cell
         participants.append(entry)
 
     # Resolve the two refresh rates present, ordered low -> high.
@@ -745,6 +793,71 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
         if group_from_means.get(k) is not None:
             group_from_means[k] = round(group_from_means[k], dp)
 
+    # ---- A-priori inclusion rule (apriori.py) --------------------------------
+    # The refresh headline above pools congruent + incongruent (the doc's
+    # "combined", a SECONDARY comparison). The a-priori PRIMARY hypothesis is
+    # the INCONGRUENT low-vs-high contrast, with its own floor/balance-filtered
+    # N. We evaluate all three comparisons per participant, attach the decision
+    # to each entry (for greying + Tier-5 reporting), and build a-priori-filtered
+    # group stats for the incongruent (primary), congruent, and combined
+    # comparisons so Tier 1 can lead with the primary and report the correct
+    # per-measure effective N.
+    channel_scoped = measure_key in ("theta_rel", "beta_rel")
+    ap_inc_diffs: List[float] = []
+    ap_con_diffs: List[float] = []
+    ap_comb_diffs: List[float] = []
+    n_channel_excluded = 0
+
+    for entry in participants:
+        by_cell = entry.pop("_by_cell", {})
+        # Per-cell surviving counts feed the rule; per-cell medians feed the
+        # a-priori-filtered difference scores (median-based, matching the
+        # headline's primary statistic).
+        cell_counts = {k: len(v) for k, v in by_cell.items()}
+        ap = apriori.evaluate_participant(cell_counts, low, high, channel_scoped)
+        entry["apriori"] = ap
+        if ap["channel_excluded"]:
+            n_channel_excluded += 1
+
+        def _cell_median(rate, cond):
+            vals = by_cell.get((rate, cond))
+            return float(np.median(vals)) if vals else None
+
+        # Incongruent (primary): included only when its comparison passes.
+        if low and high and ap["incongruent"]["passes"]:
+            ilo, ihi = _cell_median(low, "first"), _cell_median(high, "first")
+            if ilo is not None and ihi is not None:
+                ap_inc_diffs.append(round(ihi - ilo, dp))
+        # Congruent (secondary).
+        if low and high and ap["congruent"]["passes"]:
+            clo, chi = _cell_median(low, "con"), _cell_median(high, "con")
+            if clo is not None and chi is not None:
+                ap_con_diffs.append(round(chi - clo, dp))
+        # Combined (secondary): pooled con+incon per rate, when it passes.
+        if low and high and ap["combined"]["passes"]:
+            comb_lo = (by_cell.get((low, "first"), []) + by_cell.get((low, "con"), []))
+            comb_hi = (by_cell.get((high, "first"), []) + by_cell.get((high, "con"), []))
+            if comb_lo and comb_hi:
+                ap_comb_diffs.append(
+                    round(float(np.median(comb_hi)) - float(np.median(comb_lo)), dp))
+
+    def _rounded_stats(diffs):
+        g = _group_stats(diffs)
+        for k in ("mean_diff", "median_diff", "sd_diff", "sem_diff",
+                  "ci95_lo", "ci95_hi", "t_stat"):
+            if g.get(k) is not None:
+                g[k] = round(g[k], max(dp, 4) if k in ("t_stat",) else dp)
+        return g
+
+    apriori_stats = {
+        "incongruent": _rounded_stats(ap_inc_diffs),   # PRIMARY
+        "congruent": _rounded_stats(ap_con_diffs),     # secondary
+        "combined": _rounded_stats(ap_comb_diffs),     # secondary
+        "n_channel_excluded": n_channel_excluded,
+        "config": apriori.config(),
+        "channel_scoped": channel_scoped,
+    }
+
     return {
         "key": measure_key,
         "label": spec["label"],
@@ -758,6 +871,7 @@ def _refresh_measure_payload(measure_key: str, subset: str = "all") -> dict:
         "participants": participants,
         "group": group,
         "group_from_means": group_from_means,
+        "apriori": apriori_stats,
         "provenance": _measure_provenance(measure_key, low, high),
     }
 
@@ -1914,6 +2028,12 @@ async def refresh_comparison(handedness: str = "all"):
     hand_counts = {"right": 0, "left": 0, "ambidextrous": 0, "unknown": 0}
     for r in _results.values():
         hand_counts[_handedness_of(r.filename)] += 1
+    # Gaming-exposure census across ALL loaded participants (Tier 3 / H2 & H4).
+    # Derived from questionnaire data via the a-priori gaming rule; never a
+    # stored roster. 'excluded' is a visible category, not a silent drop.
+    gaming_counts = {"high": 0, "low": 0, "excluded": 0, "unknown": 0}
+    for r in _results.values():
+        gaming_counts[_gaming_of(r.filename)] += 1
     return {
         "measures": measures,
         "n_subjects": len(in_subset),
@@ -1921,6 +2041,13 @@ async def refresh_comparison(handedness: str = "all"):
         "n_with_refresh_order": n_with_order,
         "handedness_subset": subset,
         "handedness_counts": hand_counts,
+        "gaming_counts": gaming_counts,
+        "gaming_config": {
+            "hours_high": GAMING_HOURS_HIGH,
+            "hours_low": GAMING_HOURS_LOW,
+            "type_high_prefixes": list(GAMING_TYPE_HIGH_PREFIXES),
+        },
+        "apriori_config": apriori.config(),
     }
 
 

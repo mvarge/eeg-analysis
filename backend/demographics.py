@@ -50,6 +50,105 @@ DISPLAY_FIELDS = [
 FILENAME_PATTERN = re.compile(r"S(\d+)P(\d+)", re.IGNORECASE)
 
 
+# ============================================================
+#  Gaming-exposure classification (Tier 3 / H2 & H4)
+# ============================================================
+# Participants are sorted into three mutually exclusive, exhaustive gaming
+# categories by an a-priori rule applied to three questionnaire fields. This is
+# a DEFINED classification rule, not a sample-relative or median split, and not
+# a stored roster — membership is always derived from the data, so adding or
+# editing a participant re-derives categories with no code change.
+#
+# Fields (from DISPLAY_FIELDS):
+#   avg_hours  = games_hours_week  ("...hours per week...on average?")
+#   week_hours = games_last_week   ("...hours...over this past week?")
+#   game_type  = game_type         (fast-paced / both / slower-paced / none)
+#
+# Rule:
+#   HIGH = avg_hours >= HIGH AND week_hours >= HIGH
+#          AND game_type in the fast-paced / both set
+#   LOW  = avg_hours <= LOW  AND week_hours <= LOW      (game_type ignored)
+#   EXCLUDED (from H2/H4) = everything else. Captures: (a) >=HIGH on one hours
+#          measure but <=LOW on the other; (b) >=HIGH on both but game_type is
+#          slower-paced / none; (c) any hours value strictly between LOW and
+#          HIGH (e.g. 4.5), which satisfies neither gate.
+#
+# Thresholds live here as config (surfaced in the How-it-works tab, never as
+# inline UI literals). High side is inclusive at 5, low side inclusive at 4;
+# the 4<x<5 gap belongs to EXCLUDED.
+GAMING_HOURS_HIGH = 5.0   # avg AND week hours must both be >= this for HIGH
+GAMING_HOURS_LOW = 4.0    # avg AND week hours must both be <= this for LOW
+
+# game_type values that qualify HIGH membership (fast-paced action, or an even
+# mix). Matched case-insensitively by prefix so encoding/quote variants of the
+# verbatim questionnaire strings still match. game_type is NOT considered for
+# LOW.
+GAMING_TYPE_HIGH_PREFIXES = ("fast-paced", "both")
+
+
+def _gaming_hours_value(value: Optional[str]) -> Optional[float]:
+    """Parse an hours answer to a float, or None when blank/unparseable.
+
+    The questionnaire stores hours as free text ("12", "2.5", "0"). A missing
+    or non-numeric hours answer cannot satisfy either the HIGH or LOW gate, so
+    the participant falls to EXCLUDED — which is the correct, visible outcome.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # Keep digits, dot, minus; tolerate stray unit text like "10 hours".
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def _gaming_type_is_high(value: Optional[str]) -> bool:
+    """True when game_type qualifies HIGH membership (fast-paced or 'both')."""
+    if not value:
+        return False
+    v = str(value).strip().lower()
+    return any(v.startswith(p) for p in GAMING_TYPE_HIGH_PREFIXES)
+
+
+def gaming_category(
+    avg_hours: Optional[str],
+    week_hours: Optional[str],
+    game_type: Optional[str],
+) -> str:
+    """Classify one participant's gaming exposure (Tier 3 / H2 & H4).
+
+    Applies the fixed rule above to the three verbatim questionnaire values.
+    Returns one of: "high", "low", "excluded".
+
+    "excluded" means excluded from the H2/H4 gaming comparison specifically —
+    the participant is still shown in Tier 3 under its own labelled category,
+    never silently merged into LOW or dropped.
+    """
+    avg = _gaming_hours_value(avg_hours)
+    week = _gaming_hours_value(week_hours)
+
+    # HIGH: both hours measures at/above the high threshold AND a qualifying
+    # game type. Missing hours (None) never satisfies >=.
+    if (avg is not None and week is not None
+            and avg >= GAMING_HOURS_HIGH and week >= GAMING_HOURS_HIGH
+            and _gaming_type_is_high(game_type)):
+        return "high"
+
+    # LOW: both hours measures at/below the low threshold (game type ignored).
+    if (avg is not None and week is not None
+            and avg <= GAMING_HOURS_LOW and week <= GAMING_HOURS_LOW):
+        return "low"
+
+    # Everything else — one-sided, high-hours-but-wrong-type, or the 4<x<5 gap.
+    return "excluded"
+
+
 def handedness_category(value: Optional[str]) -> str:
     """Map the verbatim demographics handedness string to a canonical category.
 
