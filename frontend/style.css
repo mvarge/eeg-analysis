@@ -1682,6 +1682,28 @@ footer p {
     font-family: var(--font-mono);
     margin: -0.6rem 0 1rem;
 }
+/* Robustness-view caption for the mean-aggregation toggle. Shown only when the
+   toggle is set to mean, on the difference-score views that actually switch
+   (Tier 2 inspection table/chart, Tier 3 gaming split). */
+.agg-robustness-note {
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--warn, #d9a441);
+    background: rgba(217, 164, 65, 0.08);
+    border-left: 3px solid var(--warn, #d9a441);
+    border-radius: 3px;
+    padding: 0.5rem 0.7rem;
+    margin: 0 0 1rem;
+}
+/* Persistent Tier-1 label: the headline is always median-aggregated and matches
+   the SPSS input — stated unconditionally, never a toggle-driven caption. */
+.t1-agg-note {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    margin-top: 0.6rem;
+    text-align: right;
+}
 .prov-note { font-size: 0.75rem; color: var(--text-dim); line-height: 1.4; margin: 0.3rem 0 0.6rem; }
 .refresh-measures {
     display: flex;

@@ -2362,6 +2362,20 @@ function sigLabel(p) {
         : '<span class="sig sig-no">n.s.</span>';
 }
 
+// Robustness-view caption for the mean-aggregation toggle. Any on-screen view
+// built on 165−60 DIFFERENCE SCORES that follows the toggle (Tier 2's
+// inspection table/chart, Tier 3's gaming split) must announce when it is
+// showing MEAN-within-participant aggregation, because the authoritative SPSS
+// interaction test uses MEDIAN-aggregated difference scores. Returns '' in
+// median/both mode (median = default = matches SPSS, no caption needed). Tier 1
+// never calls this — its headline is permanently median-aggregated.
+function robustnessCaption() {
+    if (refreshAgg !== 'mean') return '';
+    return `<div class="agg-robustness-note">Robustness view — mean-aggregated.
+        The authoritative SPSS test uses median-aggregated difference scores;
+        switch to median to match reported results.</div>`;
+}
+
 // ── Tier 1 — Headline ──
 // The 60-vs-165 result for each measure, leading with the a-priori PRIMARY
 // comparison (INCONGRUENT low-vs-high): mean Δ (165 − 60), 95% CI, the
@@ -2433,7 +2447,8 @@ function renderTier1Headline(measures) {
         </div>`;
     }).join('');
 
-    el.innerHTML = `<div class="t1-grid">${cards}</div>`;
+    el.innerHTML = `<div class="t1-grid">${cards}</div>
+        <div class="t1-agg-note" title="The headline uses the a-priori primary contrast, aggregated as the mean of per-participant medians — the same construction as the SPSS input. It never follows the median/mean inspection toggle.">median-aggregated — matches the authoritative SPSS input</div>`;
 }
 
 // ── Tier 3 — Gaming-group split (H2/H4) ──
@@ -2477,7 +2492,7 @@ function renderTier3Gaming(data) {
         return;
     }
 
-    el.innerHTML = measures.map(m => `
+    el.innerHTML = robustnessCaption() + measures.map(m => `
         <div class="t3-measure">
             <h4 class="t3-title">${escapeHtml(m.label)} <span class="t3-unit">${escapeHtml(m.unit)}</span></h4>
             <div class="t3-chart" id="t3-chart-${m.key}"></div>
@@ -3026,6 +3041,7 @@ function renderRefreshMeasures(measures) {
                 <button class="btn-ghost btn-sm refresh-prov-btn" data-measure="${m.key}">How was this computed?</button>
             </div>
             ${groupHtml}
+            ${robustnessCaption()}
             <div class="refresh-chart" id="refresh-chart-${m.key}"
                  role="button" tabindex="0" title="Click to see the computation trace"></div>
             <div class="compare-table-wrap">
@@ -3308,8 +3324,11 @@ function initActions() {
     });
 
     // Per-participant aggregation toggle (median / mean / side by side).
-    // Inspection only: re-renders the tables and charts from the already-loaded
-    // data; never re-fetches, never touches the group headline or the export.
+    // Inspection only: re-renders the toggle-following views from the
+    // already-loaded data; never re-fetches, never touches the group headline
+    // or the export. Both Tier 2 (inspection table/chart) AND Tier 3 (gaming
+    // split) follow the toggle, so both must re-render — otherwise Tier 3's
+    // mean branch and its robustness caption never update.
     const aggToggle = document.getElementById('refresh-agg-toggle');
     if (aggToggle) {
         aggToggle.querySelectorAll('.seg-btn').forEach(btn => {
@@ -3317,7 +3336,10 @@ function initActions() {
                 refreshAgg = btn.dataset.agg;
                 aggToggle.querySelectorAll('.seg-btn').forEach(b =>
                     b.classList.toggle('active', b === btn));
-                if (refreshData) renderRefreshMeasures(refreshData.measures);
+                if (refreshData) {
+                    renderRefreshMeasures(refreshData.measures);
+                    renderTier3Gaming(refreshData);
+                }
             });
         });
     }
